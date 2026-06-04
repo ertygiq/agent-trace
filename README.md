@@ -46,16 +46,17 @@ agent-trace --harness claude --session <id> --thinking --bash-command
 agent-trace --harness claude --session <id> --bash
 ```
 
-Draft categories:
+Filters:
 
-- `human`: human-authored messages only (`--user` is an alias)
-- `assistant`: assistant text messages only
-- `thinking`: assistant thinking blocks
-- `bash-description`: harness-provided description for a Bash command, when available
-- `bash-command`: Bash command text
-- `bash-output`: Bash command output/result
-
-`--bash` is a shortcut for `--bash-description --bash-command --bash-output`.
+- `--human`: human-authored messages only
+- `--user`: alias for `--human`
+- `--assistant`: assistant text messages only
+- `--thinking`: assistant thinking blocks
+- `--bash-description`: harness-provided description for a Bash command, when available
+- `--bash-command`: Bash command text
+- `--bash-output`: Bash command output/result
+- `--bash`: shortcut for `--bash-description --bash-command --bash-output`
+- `--all`: all supported categories
 
 Generic `tool` filtering is intentionally skipped for now.
 
