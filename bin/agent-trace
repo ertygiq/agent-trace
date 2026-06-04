@@ -7,6 +7,7 @@ from pathlib import Path
 
 DEFAULT_ROOTS = {
     "claude": Path.home() / ".claude" / "projects",
+    "pi": Path.home() / ".pi",
 }
 
 FILTERS = (
@@ -37,9 +38,9 @@ KNOWN_OPTIONS = VALUE_OPTIONS | FLAG_OPTIONS
 USAGE = """Usage: agent-trace --harness HARNESS --session SESSION_ID [--root PATH] FILTER...
 
 Options:
-        --harness HARNESS            Harness type. Initially: claude
+        --harness HARNESS            Harness type. Supported: claude, pi
         --session SESSION_ID         Session ID
-        --root PATH                  Optional. Overrides the default sessions root. For Claude Code, this is the projects directory that contains session .jsonl files.
+        --root PATH                  Optional. Overrides the default harness data root. For Claude Code, use the projects directory. For Pi, use the .pi directory.
     -h, --help                       Show help
 
 Filters:
@@ -70,7 +71,10 @@ class AgentTrace:
         if harness == "claude":
             self.render_claude()
             return
-        raise AgentTraceError(f"unsupported harness: {harness!r}")
+        if harness == "pi":
+            self.render_pi()
+            return
+        raise AgentTraceError(f"unsupported harness: {harness!r}. Available harnesses: {available_harnesses_text()}")
 
     def parse(self, argv):
         argv = list(argv)
@@ -163,12 +167,12 @@ class AgentTrace:
         if not present(self.options.get("session_id")):
             raise AgentTraceError("missing --session")
         if self.options["harness"] not in DEFAULT_ROOTS:
-            raise AgentTraceError(f"unsupported harness: {self.options['harness']!r}")
+            raise AgentTraceError(f"unsupported harness: {self.options['harness']!r}. Available harnesses: {available_harnesses_text()}")
         if not self.options["filters"]:
-            raise AgentTraceError("at least one filter must be specified")
+            raise AgentTraceError("at least one filter must be specified. Available filters: " + available_filters_text())
 
     def render_claude(self):
-        session_file = self.find_claude_session_file()
+        session_file = self.find_session_file("claude")
         bash_tool_ids = set()
 
         with session_file.open("r", encoding="utf-8") as lines:
@@ -269,16 +273,81 @@ class AgentTrace:
         print(text)
         print()
 
-    def find_claude_session_file(self):
-        root = Path(self.options.get("root") or DEFAULT_ROOTS["claude"]).expanduser()
+    def render_pi(self):
+        session_file = self.find_session_file("pi")
+        bash_tool_ids = set()
+
+        with session_file.open("r", encoding="utf-8") as lines:
+            for line_number, line in enumerate(lines, start=1):
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise AgentTraceError(f"invalid JSON in {session_file}:{line_number}: {error}") from error
+
+                self.render_pi_entry(entry, bash_tool_ids)
+
+    def render_pi_entry(self, entry, bash_tool_ids):
+        if entry.get("type") == "session":
+            if entry.get("id") != self.options["session_id"]:
+                raise AgentTraceError(f"session file id mismatch: expected {self.options['session_id']}, got {entry.get('id')}")
+            return
+        if entry.get("type") != "message":
+            return
+
+        timestamp = entry.get("timestamp")
+        message = entry.get("message") or {}
+        role = message.get("role")
+        content = message.get("content")
+
+        if role == "user":
+            self.emit("human", timestamp, extract_text_content(content))
+        elif role == "assistant":
+            self.render_pi_assistant(timestamp, content, bash_tool_ids)
+        elif role == "toolResult":
+            if message.get("toolName") == "bash" or message.get("toolCallId") in bash_tool_ids:
+                self.emit("bash_output", timestamp, extract_text_content(content))
+        elif role == "bashExecution":
+            self.emit("bash_command", timestamp, str(message.get("command", "")))
+            self.emit("bash_output", timestamp, str(message.get("output", "")))
+
+    def render_pi_assistant(self, timestamp, content, bash_tool_ids):
+        if not isinstance(content, list):
+            return
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                self.emit("assistant", timestamp, str(block.get("text", "")))
+            elif block_type == "thinking":
+                self.emit("thinking", timestamp, extract_thinking_text(block))
+            elif block_type == "toolCall" and block.get("name") == "bash":
+                tool_id = block.get("id")
+                if not present(tool_id):
+                    raise AgentTraceError("Pi bash toolCall is missing id")
+                bash_tool_ids.add(tool_id)
+                arguments = block.get("arguments")
+                if not isinstance(arguments, dict):
+                    raise AgentTraceError(f"Pi bash toolCall {tool_id} has invalid arguments")
+                if "command" not in arguments:
+                    raise AgentTraceError(f"Pi bash toolCall {tool_id} is missing arguments.command")
+                if "description" in arguments:
+                    self.emit("bash_description", timestamp, str(arguments["description"]))
+                self.emit("bash_command", timestamp, str(arguments["command"]))
+
+    def find_session_file(self, harness):
+        root = Path(self.options.get("root") or DEFAULT_ROOTS[harness]).expanduser()
         if not root.exists():
             raise AgentTraceError(f"root does not exist: {root}")
         if not root.is_dir():
             raise AgentTraceError(f"root is not a directory: {root}")
 
-        matches = list(root.rglob(f"{self.options['session_id']}.jsonl"))
+        pattern = f"{self.options['session_id']}.jsonl" if harness == "claude" else f"*{self.options['session_id']}*.jsonl"
+        search_root = pi_sessions_root(root) if harness == "pi" else root
+        matches = list(search_root.rglob(pattern))
         if not matches:
-            raise AgentTraceError(f"session not found under {root}: {self.options['session_id']}")
+            raise AgentTraceError(f"session not found under {search_root}: {self.options['session_id']}")
         if len(matches) > 1:
             raise AgentTraceError("multiple session files found: " + ", ".join(str(match) for match in matches))
         return matches[0]
@@ -297,7 +366,10 @@ def extract_tag(text, tag):
 
 
 def extract_tool_result_text(block):
-    content = block.get("content")
+    return extract_text_content(block.get("content"))
+
+
+def extract_text_content(content):
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -313,11 +385,37 @@ def extract_tool_result_text(block):
     return str(content)
 
 
+def pi_sessions_root(root):
+    candidate = root / "agent" / "sessions"
+    if candidate.is_dir():
+        return candidate
+    return root
+
+
 def extract_thinking_text(block):
     text = block.get("thinking") or block.get("text")
     if present(text):
         return text
     return "[thinking block present but no plaintext thinking field]"
+
+
+def available_harnesses_text():
+    return ", ".join(sorted(DEFAULT_ROOTS))
+
+
+def available_filters_text():
+    return ", ".join(
+        (
+            "--human",
+            "--assistant",
+            "--thinking",
+            "--bash-description",
+            "--bash-command",
+            "--bash-output",
+            "--bash",
+            "--all",
+        )
+    )
 
 
 def present(value):

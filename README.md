@@ -6,23 +6,28 @@ Useful for inspecting agent runs, debugging what happened, and evaluating agent 
 
 Implemented in Python using only the standard library.
 
-## Initial scope
+## Supported harnesses
 
-Start with Claude Code. Add more harness adapters later, with Pi planned next.
+- Claude Code
+- Pi
+
+More harness adapters can be added later.
 
 ## CLI shape
 
 ```bash
 agent-trace --harness claude --session <session-id> <filter>...
+agent-trace --harness pi --session <session-id> <filter>...
 agent-trace --harness claude --session <session-id> --root /path/to/claude/projects <filter>...
+agent-trace --harness pi --session <session-id> --root /path/to/.pi <filter>...
 ```
 
 ## Harness defaults
 
 - `claude`: `~/.claude/projects`
-- future `pi`: TBD
+- `pi`: `~/.pi`
 
-`--root` overrides the default transcript root for the selected harness. For Claude Code, this means the directory containing encoded project folders and session `.jsonl` files.
+`--root` overrides the default harness data root. For Claude Code, use the projects directory that contains encoded project folders and session `.jsonl` files. For Pi, use the `.pi` directory.
 
 ## Filter model
 
@@ -46,7 +51,7 @@ Draft categories:
 - `human`: human-authored messages only (`--user` is an alias)
 - `assistant`: assistant text messages only
 - `thinking`: assistant thinking blocks
-- `bash-description`: Claude Code's description for a Bash command
+- `bash-description`: harness-provided description for a Bash command, when available
 - `bash-command`: Bash command text
 - `bash-output`: Bash command output/result
 
@@ -58,8 +63,8 @@ Generic `tool` filtering is intentionally skipped for now.
 
 ```bash
 agent-trace \
-  --harness claude \
+  --harness pi \
   --session <session-id> \
-  --root /path/to/claude/projects \
+  --root /path/to/.pi \
   --bash-command
 ```
