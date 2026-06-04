@@ -1,6 +1,10 @@
 # agent-trace
 
-Universal text transcript CLI for agent/harness sessions.
+Universal text transcript CLI for agent/harness sessions. Output is text only. No HTML/TUI.
+
+Useful for inspecting agent runs, debugging what happened, and evaluating agent results — including handing filtered transcripts to another agent for review.
+
+Implemented in Python using only the standard library.
 
 ## Initial scope
 
@@ -9,8 +13,8 @@ Start with Claude Code. Add more harness adapters later, with Pi planned next.
 ## CLI shape
 
 ```bash
-agent-trace --harness claude --session <session-id> [filters]
-agent-trace --harness claude --session <session-id> --root /path/to/claude/projects [filters]
+agent-trace --harness claude --session <session-id> <filter>...
+agent-trace --harness claude --session <session-id> --root /path/to/claude/projects <filter>...
 ```
 
 ## Harness defaults
@@ -20,13 +24,9 @@ agent-trace --harness claude --session <session-id> --root /path/to/claude/proje
 
 `--root` overrides the default transcript root for the selected harness. For Claude Code, this means the directory containing encoded project folders and session `.jsonl` files.
 
-## Output
-
-Text only. No HTML/TUI.
-
 ## Filter model
 
-Filters select event categories. Multiple filters are combined as union/OR. If no filter is passed, all currently supported categories are shown.
+Filters select event categories. At least one filter is required. Multiple filters are combined as union/OR.
 
 Examples:
 

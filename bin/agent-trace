@@ -1,227 +1,340 @@
-#!/usr/bin/env ruby
-# frozen_string_literal: true
+#!/usr/bin/env python3
 
-require 'json'
-require 'optparse'
-require 'pathname'
+import json
+import re
+import sys
+from pathlib import Path
 
-class AgentTrace
-  DEFAULT_ROOTS = {
-    'claude' => File.expand_path('~/.claude/projects')
-  }.freeze
+DEFAULT_ROOTS = {
+    "claude": Path.home() / ".claude" / "projects",
+}
 
-  FILTERS = %i[human assistant thinking bash_description bash_command bash_output].freeze
+FILTERS = (
+    "human",
+    "assistant",
+    "thinking",
+    "bash_description",
+    "bash_command",
+    "bash_output",
+)
 
-  def self.run(argv)
-    new(argv).run
-  end
+VALUE_OPTIONS = {"--harness", "--session", "--root"}
+FLAG_OPTIONS = {
+    "--human",
+    "--user",
+    "--assistant",
+    "--thinking",
+    "--bash-description",
+    "--bash-command",
+    "--bash-output",
+    "--bash",
+    "--all",
+    "-h",
+    "--help",
+}
+KNOWN_OPTIONS = VALUE_OPTIONS | FLAG_OPTIONS
 
-  def initialize(argv)
-    @options = {
-      filters: []
-    }
-    parse!(argv)
-  end
+USAGE = """Usage: agent-trace --harness HARNESS --session SESSION_ID [--root PATH] FILTER...
 
-  def run
-    validate!
+Options:
+        --harness HARNESS            Harness type. Initially: claude
+        --session SESSION_ID         Session ID
+        --root PATH                  Optional. Overrides the default sessions root. For Claude Code, this is the projects directory that contains session .jsonl files.
+    -h, --help                       Show help
 
-    case @options.fetch(:harness)
-    when 'claude'
-      render_claude
-    else
-      raise ArgumentError, "unsupported harness: #{@options.fetch(:harness).inspect}"
-    end
-  end
+Filters:
+        --human                      Show human-authored messages
+        --user                       Alias for --human
+        --assistant                  Show assistant text messages
+        --thinking                   Show assistant thinking blocks
+        --bash-description           Show Bash tool-use descriptions
+        --bash-command               Show Bash commands
+        --bash-output                Show Bash command outputs
+        --bash                       Shortcut for --bash-description --bash-command --bash-output
+        --all                        Show all supported categories
+"""
 
-  private
 
-  def parse!(argv)
-    parser = OptionParser.new do |opts|
-      opts.banner = 'Usage: agent-trace --harness claude --session SESSION_ID [--root PATH] [filters]'
+class AgentTraceError(Exception):
+    pass
 
-      opts.on('--harness HARNESS', 'Harness type. Initially: claude') { |v| @options[:harness] = v }
-      opts.on('--session SESSION_ID', 'Session ID') { |v| @options[:session_id] = v }
-      opts.on('--root PATH', 'Override harness transcript root') { |v| @options[:root] = v }
 
-      opts.on('--human', 'Show human-authored messages') { add_filter(:human) }
-      opts.on('--user', 'Alias for --human') { add_filter(:human) }
-      opts.on('--assistant', 'Show assistant text messages') { add_filter(:assistant) }
-      opts.on('--thinking', 'Show assistant thinking blocks') { add_filter(:thinking) }
-      opts.on('--bash-description', 'Show Bash tool-use descriptions') { add_filter(:bash_description) }
-      opts.on('--bash-command', 'Show Bash commands') { add_filter(:bash_command) }
-      opts.on('--bash-output', 'Show Bash command outputs') { add_filter(:bash_output) }
-      opts.on('--bash', 'Shortcut for --bash-description --bash-command --bash-output') do
-        add_filter(:bash_description)
-        add_filter(:bash_command)
-        add_filter(:bash_output)
-      end
-      opts.on('--all', 'Show all supported categories') { @options[:filters] = FILTERS.dup }
-      opts.on('-h', '--help', 'Show help') do
-        puts opts
-        exit 0
-      end
-    end
+class AgentTrace:
+    def __init__(self, argv):
+        self.options = {"filters": []}
+        self.parse(argv)
 
-    parser.parse!(argv)
-    raise ArgumentError, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
-  end
+    def run(self):
+        self.validate()
+        harness = self.options["harness"]
+        if harness == "claude":
+            self.render_claude()
+            return
+        raise AgentTraceError(f"unsupported harness: {harness!r}")
 
-  def add_filter(filter)
-    raise ArgumentError, "unknown filter: #{filter.inspect}" unless FILTERS.include?(filter)
+    def parse(self, argv):
+        argv = list(argv)
+        self.validate_argv(argv)
 
-    @options[:filters] << filter
-    @options[:filters].uniq!
-  end
+        index = 0
+        while index < len(argv):
+            arg = argv[index]
+            option, separator, inline_value = arg.partition("=")
 
-  def validate!
-    raise ArgumentError, 'missing --harness' unless present?(@options[:harness])
-    raise ArgumentError, 'missing --session' unless present?(@options[:session_id])
+            if option in VALUE_OPTIONS:
+                if separator:
+                    value = inline_value
+                else:
+                    index += 1
+                    value = argv[index]
+                if option == "--harness":
+                    self.options["harness"] = value
+                elif option == "--session":
+                    self.options["session_id"] = value
+                elif option == "--root":
+                    self.options["root"] = value
+            elif option in FLAG_OPTIONS:
+                self.apply_flag(option)
 
-    unless DEFAULT_ROOTS.key?(@options[:harness])
-      raise ArgumentError, "unsupported harness: #{@options[:harness].inspect}"
-    end
+            index += 1
 
-    @options[:filters] = FILTERS.dup if @options[:filters].empty?
-  end
+    def validate_argv(self, argv):
+        index = 0
+        while index < len(argv):
+            arg = argv[index]
 
-  def render_claude
-    file = find_claude_session_file
-    bash_tool_ids = {}
+            if arg.startswith("--"):
+                option, separator, value = arg.partition("=")
+                if option not in KNOWN_OPTIONS:
+                    raise AgentTraceError(f"unknown option: {option}")
 
-    File.foreach(file) do |line|
-      record = JSON.parse(line)
-      next unless record['sessionId'] == @options.fetch(:session_id)
+                if option in VALUE_OPTIONS:
+                    if separator:
+                        if not present(value):
+                            raise AgentTraceError(f"missing value for {option}")
+                    else:
+                        if index + 1 >= len(argv) or not present(argv[index + 1]) or argv[index + 1].startswith("-"):
+                            raise AgentTraceError(f"missing value for {option}")
+                        index += 1
+                elif separator:
+                    raise AgentTraceError(f"{option} does not accept a value")
+            elif arg.startswith("-"):
+                if arg not in KNOWN_OPTIONS:
+                    raise AgentTraceError(f"unknown option: {arg}")
+            else:
+                raise AgentTraceError(f"unexpected argument: {arg}")
 
-      render_claude_record(record, bash_tool_ids)
-    rescue JSON::ParserError => e
-      raise "invalid JSON in #{file}: #{e.message}"
-    end
-  end
+            index += 1
 
-  def render_claude_record(record, bash_tool_ids)
-    timestamp = record['timestamp']
-    content = record.dig('message', 'content')
+    def apply_flag(self, option):
+        if option in ("-h", "--help"):
+            print(USAGE, end="")
+            raise SystemExit(0)
+        if option in ("--human", "--user"):
+            self.add_filter("human")
+        elif option == "--assistant":
+            self.add_filter("assistant")
+        elif option == "--thinking":
+            self.add_filter("thinking")
+        elif option == "--bash-description":
+            self.add_filter("bash_description")
+        elif option == "--bash-command":
+            self.add_filter("bash_command")
+        elif option == "--bash-output":
+            self.add_filter("bash_output")
+        elif option == "--bash":
+            self.add_filter("bash_description")
+            self.add_filter("bash_command")
+            self.add_filter("bash_output")
+        elif option == "--all":
+            self.options["filters"] = list(FILTERS)
+        else:
+            raise AgentTraceError(f"unknown option: {option}")
 
-    case record['type']
-    when 'user'
-      render_user(record, timestamp, content, bash_tool_ids)
-    when 'assistant'
-      render_assistant(timestamp, content, bash_tool_ids)
-    end
-  end
+    def add_filter(self, filter_name):
+        if filter_name not in FILTERS:
+            raise AgentTraceError(f"unknown filter: {filter_name!r}")
+        if filter_name not in self.options["filters"]:
+            self.options["filters"].append(filter_name)
 
-  def render_user(record, timestamp, content, bash_tool_ids)
-    human_text = extract_human_text(record, content)
-    emit(:human, timestamp, human_text) if human_text
+    def validate(self):
+        if not present(self.options.get("harness")):
+            raise AgentTraceError("missing --harness")
+        if not present(self.options.get("session_id")):
+            raise AgentTraceError("missing --session")
+        if self.options["harness"] not in DEFAULT_ROOTS:
+            raise AgentTraceError(f"unsupported harness: {self.options['harness']!r}")
+        if not self.options["filters"]:
+            raise AgentTraceError("at least one filter must be specified")
 
-    return unless content.is_a?(Array)
+    def render_claude(self):
+        session_file = self.find_claude_session_file()
+        bash_tool_ids = set()
 
-    content.each do |block|
-      case block['type']
-      when 'tool_result'
-        next unless bash_tool_ids.key?(block['tool_use_id'])
+        with session_file.open("r", encoding="utf-8") as lines:
+            for line_number, line in enumerate(lines, start=1):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise AgentTraceError(f"invalid JSON in {session_file}:{line_number}: {error}") from error
 
-        emit(:bash_output, timestamp, extract_tool_result_text(block))
-      end
-    end
-  end
+                if record.get("sessionId") != self.options["session_id"]:
+                    continue
+                self.render_claude_record(record, bash_tool_ids)
 
-  def extract_human_text(record, content)
-    return nil if record['isMeta']
-    return nil if record.key?('toolUseResult') || record.key?('sourceToolAssistantUUID')
+    def render_claude_record(self, record, bash_tool_ids):
+        timestamp = record.get("timestamp")
+        message = record.get("message") or {}
+        content = message.get("content")
 
-    if content.is_a?(String)
-      return extract_command_message(content) || content
-    end
+        if record.get("type") == "user":
+            self.render_user(record, timestamp, content, bash_tool_ids)
+        elif record.get("type") == "assistant":
+            self.render_assistant(timestamp, content, bash_tool_ids)
 
-    return nil unless content.is_a?(Array)
+    def render_user(self, record, timestamp, content, bash_tool_ids):
+        human_text = self.extract_human_text(record, content)
+        if human_text is not None:
+            self.emit("human", timestamp, human_text)
 
-    text = content.filter_map { |block| block['text'] if block['type'] == 'text' }.join("\n\n")
-    present?(text) ? text : nil
-  end
+        if not isinstance(content, list):
+            return
 
-  def extract_command_message(text)
-    command_name = text[/<command-name>(.*?)<\/command-name>/m, 1]
-    command_args = text[/<command-args>(.*?)<\/command-args>/m, 1]
-    return nil unless command_name || command_args
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_result":
+                continue
+            if block.get("tool_use_id") not in bash_tool_ids:
+                continue
+            self.emit("bash_output", timestamp, extract_tool_result_text(block))
 
-    [command_name, command_args].compact.join("\n")
-  end
+    def extract_human_text(self, record, content):
+        if record.get("isMeta"):
+            return None
+        if "toolUseResult" in record or "sourceToolAssistantUUID" in record:
+            return None
 
-  def render_assistant(timestamp, content, bash_tool_ids)
-    return unless content.is_a?(Array)
+        if isinstance(content, str):
+            return extract_command_message(content) or content
 
-    content.each do |block|
-      case block['type']
-      when 'text'
-        emit(:assistant, timestamp, block['text'].to_s)
-      when 'thinking'
-        emit(:thinking, timestamp, extract_thinking_text(block))
-      when 'tool_use'
-        render_tool_use(timestamp, block, bash_tool_ids)
-      end
-    end
-  end
+        if not isinstance(content, list):
+            return None
 
-  def render_tool_use(timestamp, block, bash_tool_ids)
-    return unless block['name'] == 'Bash'
+        parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
+        text = "\n\n".join(part for part in parts if present(part))
+        return text if present(text) else None
 
-    bash_tool_ids[block.fetch('id')] = true
-    input = block['input']
-    raise ArgumentError, "Bash tool_use #{block['id']} has invalid input" unless input.is_a?(Hash)
+    def render_assistant(self, timestamp, content, bash_tool_ids):
+        if not isinstance(content, list):
+            return
 
-    emit(:bash_description, timestamp, input['description'].to_s) if input.key?('description')
-    emit(:bash_command, timestamp, input.fetch('command').to_s)
-  end
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                self.emit("assistant", timestamp, str(block.get("text", "")))
+            elif block_type == "thinking":
+                self.emit("thinking", timestamp, extract_thinking_text(block))
+            elif block_type == "tool_use":
+                self.render_tool_use(timestamp, block, bash_tool_ids)
 
-  def extract_tool_result_text(block)
-    content = block['content']
-    return content if content.is_a?(String)
-    return content.map { |entry| entry.is_a?(Hash) ? entry['text'] : entry }.compact.join("\n") if content.is_a?(Array)
+    def render_tool_use(self, timestamp, block, bash_tool_ids):
+        if block.get("name") != "Bash":
+            return
 
-    content.to_s
-  end
+        tool_id = block.get("id")
+        if not present(tool_id):
+            raise AgentTraceError("Bash tool_use is missing id")
+        bash_tool_ids.add(tool_id)
 
-  def extract_thinking_text(block)
-    text = block['thinking'] || block['text']
-    return text if present?(text)
+        tool_input = block.get("input")
+        if not isinstance(tool_input, dict):
+            raise AgentTraceError(f"Bash tool_use {tool_id} has invalid input")
+        if "command" not in tool_input:
+            raise AgentTraceError(f"Bash tool_use {tool_id} is missing input.command")
 
-    '[thinking block present but no plaintext thinking field]'
-  end
+        if "description" in tool_input:
+            self.emit("bash_description", timestamp, str(tool_input["description"]))
+        self.emit("bash_command", timestamp, str(tool_input["command"]))
 
-  def emit(filter, timestamp, text)
-    return unless @options.fetch(:filters).include?(filter)
-    return unless present?(text)
+    def emit(self, filter_name, timestamp, text):
+        if filter_name not in self.options["filters"]:
+            return
+        if not present(text):
+            return
 
-    puts "## #{filter.to_s.tr('_', '-')} #{timestamp}"
-    puts text
-    puts
-  end
+        print(f"## {filter_name.replace('_', '-')} {timestamp}")
+        print(text)
+        print()
 
-  def find_claude_session_file
-    root = Pathname.new(@options[:root] || DEFAULT_ROOTS.fetch('claude')).expand_path
-    raise ArgumentError, "root does not exist: #{root}" unless root.exist?
-    raise ArgumentError, "root is not a directory: #{root}" unless root.directory?
+    def find_claude_session_file(self):
+        root = Path(self.options.get("root") or DEFAULT_ROOTS["claude"]).expanduser()
+        if not root.exists():
+            raise AgentTraceError(f"root does not exist: {root}")
+        if not root.is_dir():
+            raise AgentTraceError(f"root is not a directory: {root}")
 
-    search_root = root
-    matches = Dir.glob(search_root.join('**', "#{@options.fetch(:session_id)}.jsonl").to_s)
-    raise ArgumentError, "session not found under #{search_root}: #{@options.fetch(:session_id)}" if matches.empty?
-    raise ArgumentError, "multiple session files found: #{matches.join(', ')}" if matches.length > 1
+        matches = list(root.rglob(f"{self.options['session_id']}.jsonl"))
+        if not matches:
+            raise AgentTraceError(f"session not found under {root}: {self.options['session_id']}")
+        if len(matches) > 1:
+            raise AgentTraceError("multiple session files found: " + ", ".join(str(match) for match in matches))
+        return matches[0]
 
-    matches.fetch(0)
-  end
 
-  def present?(value)
-    !value.nil? && value != ''
-  end
-end
+def extract_command_message(text):
+    command_name = extract_tag(text, "command-name")
+    command_args = extract_tag(text, "command-args")
+    parts = [part for part in (command_name, command_args) if part is not None]
+    return "\n".join(parts) if parts else None
 
-begin
-  AgentTrace.run(ARGV)
-rescue Errno::EPIPE
-  exit 0
-rescue StandardError => e
-  warn "agent-trace: #{e.message}"
-  exit 1
-end
+
+def extract_tag(text, tag):
+    match = re.search(rf"<{re.escape(tag)}>(.*?)</{re.escape(tag)}>", text, re.DOTALL)
+    return match.group(1) if match else None
+
+
+def extract_tool_result_text(block):
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for entry in content:
+            if isinstance(entry, dict):
+                value = entry.get("text")
+            else:
+                value = entry
+            if value is not None:
+                parts.append(str(value))
+        return "\n".join(parts)
+    return str(content)
+
+
+def extract_thinking_text(block):
+    text = block.get("thinking") or block.get("text")
+    if present(text):
+        return text
+    return "[thinking block present but no plaintext thinking field]"
+
+
+def present(value):
+    return value is not None and value != ""
+
+
+def main(argv):
+    try:
+        AgentTrace(argv).run()
+    except BrokenPipeError:
+        return 0
+    except AgentTraceError as error:
+        print(f"agent-trace: {error}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
