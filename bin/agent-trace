@@ -1,0 +1,227 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require 'json'
+require 'optparse'
+require 'pathname'
+
+class AgentTrace
+  DEFAULT_ROOTS = {
+    'claude' => File.expand_path('~/.claude/projects')
+  }.freeze
+
+  FILTERS = %i[human assistant thinking bash_description bash_command bash_output].freeze
+
+  def self.run(argv)
+    new(argv).run
+  end
+
+  def initialize(argv)
+    @options = {
+      filters: []
+    }
+    parse!(argv)
+  end
+
+  def run
+    validate!
+
+    case @options.fetch(:harness)
+    when 'claude'
+      render_claude
+    else
+      raise ArgumentError, "unsupported harness: #{@options.fetch(:harness).inspect}"
+    end
+  end
+
+  private
+
+  def parse!(argv)
+    parser = OptionParser.new do |opts|
+      opts.banner = 'Usage: agent-trace --harness claude --session SESSION_ID [--root PATH] [filters]'
+
+      opts.on('--harness HARNESS', 'Harness type. Initially: claude') { |v| @options[:harness] = v }
+      opts.on('--session SESSION_ID', 'Session ID') { |v| @options[:session_id] = v }
+      opts.on('--root PATH', 'Override harness transcript root') { |v| @options[:root] = v }
+
+      opts.on('--human', 'Show human-authored messages') { add_filter(:human) }
+      opts.on('--user', 'Alias for --human') { add_filter(:human) }
+      opts.on('--assistant', 'Show assistant text messages') { add_filter(:assistant) }
+      opts.on('--thinking', 'Show assistant thinking blocks') { add_filter(:thinking) }
+      opts.on('--bash-description', 'Show Bash tool-use descriptions') { add_filter(:bash_description) }
+      opts.on('--bash-command', 'Show Bash commands') { add_filter(:bash_command) }
+      opts.on('--bash-output', 'Show Bash command outputs') { add_filter(:bash_output) }
+      opts.on('--bash', 'Shortcut for --bash-description --bash-command --bash-output') do
+        add_filter(:bash_description)
+        add_filter(:bash_command)
+        add_filter(:bash_output)
+      end
+      opts.on('--all', 'Show all supported categories') { @options[:filters] = FILTERS.dup }
+      opts.on('-h', '--help', 'Show help') do
+        puts opts
+        exit 0
+      end
+    end
+
+    parser.parse!(argv)
+    raise ArgumentError, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
+  end
+
+  def add_filter(filter)
+    raise ArgumentError, "unknown filter: #{filter.inspect}" unless FILTERS.include?(filter)
+
+    @options[:filters] << filter
+    @options[:filters].uniq!
+  end
+
+  def validate!
+    raise ArgumentError, 'missing --harness' unless present?(@options[:harness])
+    raise ArgumentError, 'missing --session' unless present?(@options[:session_id])
+
+    unless DEFAULT_ROOTS.key?(@options[:harness])
+      raise ArgumentError, "unsupported harness: #{@options[:harness].inspect}"
+    end
+
+    @options[:filters] = FILTERS.dup if @options[:filters].empty?
+  end
+
+  def render_claude
+    file = find_claude_session_file
+    bash_tool_ids = {}
+
+    File.foreach(file) do |line|
+      record = JSON.parse(line)
+      next unless record['sessionId'] == @options.fetch(:session_id)
+
+      render_claude_record(record, bash_tool_ids)
+    rescue JSON::ParserError => e
+      raise "invalid JSON in #{file}: #{e.message}"
+    end
+  end
+
+  def render_claude_record(record, bash_tool_ids)
+    timestamp = record['timestamp']
+    content = record.dig('message', 'content')
+
+    case record['type']
+    when 'user'
+      render_user(record, timestamp, content, bash_tool_ids)
+    when 'assistant'
+      render_assistant(timestamp, content, bash_tool_ids)
+    end
+  end
+
+  def render_user(record, timestamp, content, bash_tool_ids)
+    human_text = extract_human_text(record, content)
+    emit(:human, timestamp, human_text) if human_text
+
+    return unless content.is_a?(Array)
+
+    content.each do |block|
+      case block['type']
+      when 'tool_result'
+        next unless bash_tool_ids.key?(block['tool_use_id'])
+
+        emit(:bash_output, timestamp, extract_tool_result_text(block))
+      end
+    end
+  end
+
+  def extract_human_text(record, content)
+    return nil if record['isMeta']
+    return nil if record.key?('toolUseResult') || record.key?('sourceToolAssistantUUID')
+
+    if content.is_a?(String)
+      return extract_command_message(content) || content
+    end
+
+    return nil unless content.is_a?(Array)
+
+    text = content.filter_map { |block| block['text'] if block['type'] == 'text' }.join("\n\n")
+    present?(text) ? text : nil
+  end
+
+  def extract_command_message(text)
+    command_name = text[/<command-name>(.*?)<\/command-name>/m, 1]
+    command_args = text[/<command-args>(.*?)<\/command-args>/m, 1]
+    return nil unless command_name || command_args
+
+    [command_name, command_args].compact.join("\n")
+  end
+
+  def render_assistant(timestamp, content, bash_tool_ids)
+    return unless content.is_a?(Array)
+
+    content.each do |block|
+      case block['type']
+      when 'text'
+        emit(:assistant, timestamp, block['text'].to_s)
+      when 'thinking'
+        emit(:thinking, timestamp, extract_thinking_text(block))
+      when 'tool_use'
+        render_tool_use(timestamp, block, bash_tool_ids)
+      end
+    end
+  end
+
+  def render_tool_use(timestamp, block, bash_tool_ids)
+    return unless block['name'] == 'Bash'
+
+    bash_tool_ids[block.fetch('id')] = true
+    input = block['input']
+    raise ArgumentError, "Bash tool_use #{block['id']} has invalid input" unless input.is_a?(Hash)
+
+    emit(:bash_description, timestamp, input['description'].to_s) if input.key?('description')
+    emit(:bash_command, timestamp, input.fetch('command').to_s)
+  end
+
+  def extract_tool_result_text(block)
+    content = block['content']
+    return content if content.is_a?(String)
+    return content.map { |entry| entry.is_a?(Hash) ? entry['text'] : entry }.compact.join("\n") if content.is_a?(Array)
+
+    content.to_s
+  end
+
+  def extract_thinking_text(block)
+    text = block['thinking'] || block['text']
+    return text if present?(text)
+
+    '[thinking block present but no plaintext thinking field]'
+  end
+
+  def emit(filter, timestamp, text)
+    return unless @options.fetch(:filters).include?(filter)
+    return unless present?(text)
+
+    puts "## #{filter.to_s.tr('_', '-')} #{timestamp}"
+    puts text
+    puts
+  end
+
+  def find_claude_session_file
+    root = Pathname.new(@options[:root] || DEFAULT_ROOTS.fetch('claude')).expand_path
+    raise ArgumentError, "root does not exist: #{root}" unless root.exist?
+    raise ArgumentError, "root is not a directory: #{root}" unless root.directory?
+
+    search_root = root
+    matches = Dir.glob(search_root.join('**', "#{@options.fetch(:session_id)}.jsonl").to_s)
+    raise ArgumentError, "session not found under #{search_root}: #{@options.fetch(:session_id)}" if matches.empty?
+    raise ArgumentError, "multiple session files found: #{matches.join(', ')}" if matches.length > 1
+
+    matches.fetch(0)
+  end
+
+  def present?(value)
+    !value.nil? && value != ''
+  end
+end
+
+begin
+  AgentTrace.run(ARGV)
+rescue Errno::EPIPE
+  exit 0
+rescue StandardError => e
+  warn "agent-trace: #{e.message}"
+  exit 1
+end
