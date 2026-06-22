@@ -7,6 +7,7 @@ from pathlib import Path
 
 DEFAULT_ROOTS = {
     "claude": Path.home() / ".claude" / "projects",
+    "codex": Path.home() / ".codex",
     "pi": Path.home() / ".pi",
 }
 
@@ -38,9 +39,9 @@ KNOWN_OPTIONS = VALUE_OPTIONS | FLAG_OPTIONS
 USAGE = """Usage: agent-trace --harness HARNESS --session SESSION_ID [--root PATH] FILTER...
 
 Options:
-        --harness HARNESS            Harness type. Supported: claude, pi
+        --harness HARNESS            Harness type. Supported: claude, codex, pi
         --session SESSION_ID         Session ID
-        --root PATH                  Optional. Overrides the default harness data root. For Claude Code, use the projects directory. For Pi, use the .pi directory.
+        --root PATH                  Optional. Overrides the default harness data root. For Claude Code, use the projects directory. For Codex and Pi, use the harness config directory.
     -h, --help                       Show help
 
 Filters:
@@ -70,6 +71,9 @@ class AgentTrace:
         harness = self.options["harness"]
         if harness == "claude":
             self.render_claude()
+            return
+        if harness == "codex":
+            self.render_codex()
             return
         if harness == "pi":
             self.render_pi()
@@ -263,15 +267,81 @@ class AgentTrace:
             self.emit("bash_description", timestamp, str(tool_input["description"]))
         self.emit("bash_command", timestamp, str(tool_input["command"]))
 
-    def emit(self, filter_name, timestamp, text):
+    def emit(self, filter_name, timestamp, text, allow_empty=False):
         if filter_name not in self.options["filters"]:
             return
-        if not present(text):
+        if not allow_empty and not present(text):
             return
 
         print(f"## {filter_name.replace('_', '-')} {timestamp}")
         print(text)
         print()
+
+    def render_codex(self):
+        session_file = self.find_session_file("codex")
+        bash_call_ids = set()
+        seen_session_meta = False
+
+        with session_file.open("r", encoding="utf-8") as lines:
+            for line_number, line in enumerate(lines, start=1):
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise AgentTraceError(f"invalid JSON in {session_file}:{line_number}: {error}") from error
+
+                if entry.get("type") == "session_meta":
+                    seen_session_meta = True
+                    payload = entry.get("payload") or {}
+                    if payload.get("id") != self.options["session_id"]:
+                        raise AgentTraceError(f"session file id mismatch: expected {self.options['session_id']}, got {payload.get('id')}")
+                    continue
+
+                self.render_codex_entry(entry, bash_call_ids)
+
+        if not seen_session_meta:
+            raise AgentTraceError(f"Codex session file is missing session_meta: {session_file}")
+
+    def render_codex_entry(self, entry, bash_call_ids):
+        timestamp = entry.get("timestamp")
+
+        if entry.get("type") == "event_msg":
+            payload = entry.get("payload") or {}
+            if payload.get("type") == "user_message":
+                self.emit("human", timestamp, str(payload.get("message", "")))
+            return
+
+        if entry.get("type") == "response_item":
+            payload = entry.get("payload") or {}
+            payload_type = payload.get("type")
+
+            if payload_type == "message":
+                if payload.get("role") == "assistant":
+                    self.emit("assistant", timestamp, extract_codex_message_text(payload.get("content")))
+            elif payload_type == "reasoning":
+                self.emit("thinking", timestamp, extract_codex_reasoning_text(payload))
+            elif payload_type == "function_call":
+                self.render_codex_function_call(timestamp, payload, bash_call_ids)
+            elif payload_type == "function_call_output" and payload.get("call_id") in bash_call_ids:
+                raw_output = payload.get("output")
+                self.emit("bash_output", timestamp, extract_codex_bash_output(raw_output), allow_empty=is_codex_terminal_bash_output(raw_output))
+
+    def render_codex_function_call(self, timestamp, payload, bash_call_ids):
+        call_name = payload.get("name")
+        if call_name not in ("exec_command", "write_stdin"):
+            return
+
+        call_id = payload.get("call_id")
+        if not present(call_id):
+            raise AgentTraceError(f"Codex {call_name} function_call is missing call_id")
+        bash_call_ids.add(call_id)
+
+        if call_name != "exec_command":
+            return
+
+        arguments = parse_codex_arguments(payload.get("arguments"), call_id)
+        if "cmd" not in arguments:
+            raise AgentTraceError(f"Codex exec_command {call_id} is missing arguments.cmd")
+        self.emit("bash_command", timestamp, str(arguments["cmd"]))
 
     def render_pi(self):
         session_file = self.find_session_file("pi")
@@ -344,13 +414,77 @@ class AgentTrace:
             raise AgentTraceError(f"root is not a directory: {root}")
 
         pattern = f"{self.options['session_id']}.jsonl" if harness == "claude" else f"*{self.options['session_id']}*.jsonl"
-        search_root = pi_sessions_root(root) if harness == "pi" else root
+        search_root = harness_sessions_root(harness, root)
         matches = list(search_root.rglob(pattern))
         if not matches:
             raise AgentTraceError(f"session not found under {search_root}: {self.options['session_id']}")
         if len(matches) > 1:
             raise AgentTraceError("multiple session files found: " + ", ".join(str(match) for match in matches))
         return matches[0]
+
+
+def parse_codex_arguments(value, call_id):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise AgentTraceError(f"Codex function_call {call_id} has invalid JSON arguments: {error}") from error
+        if isinstance(parsed, dict):
+            return parsed
+    raise AgentTraceError(f"Codex function_call {call_id} has invalid arguments")
+
+
+def extract_codex_message_text(content):
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    parts = []
+    for block in content:
+        if isinstance(block, dict):
+            value = block.get("text") or block.get("input_text") or block.get("output_text")
+        else:
+            value = block
+        if value is not None:
+            parts.append(str(value))
+    return "\n".join(parts)
+
+
+def extract_codex_bash_output(output):
+    if output is None:
+        return ""
+    text = str(output)
+    marker = "\nOutput:\n"
+    if marker in text:
+        return text.split(marker, 1)[1]
+    if text.startswith("Output:\n"):
+        return text[len("Output:\n"):]
+    return text
+
+
+def is_codex_terminal_bash_output(output):
+    if output is None:
+        return False
+    text = str(output)
+    return text.startswith("Exit code:") or "\nProcess exited with code " in text
+
+
+def extract_codex_reasoning_text(payload):
+    summary = payload.get("summary")
+    if isinstance(summary, list):
+        text = extract_codex_message_text(summary)
+        if present(text):
+            return text
+    elif present(summary):
+        return str(summary)
+    if present(payload.get("text")):
+        return str(payload["text"])
+    if present(payload.get("encrypted_content")):
+        return "[reasoning block present but plaintext reasoning is not available]"
+    return "[reasoning block present but no plaintext reasoning field]"
 
 
 def extract_command_message(text):
@@ -385,10 +519,15 @@ def extract_text_content(content):
     return str(content)
 
 
-def pi_sessions_root(root):
-    candidate = root / "agent" / "sessions"
-    if candidate.is_dir():
-        return candidate
+def harness_sessions_root(harness, root):
+    if harness == "codex":
+        candidate = root / "sessions"
+        if candidate.is_dir():
+            return candidate
+    if harness == "pi":
+        candidate = root / "agent" / "sessions"
+        if candidate.is_dir():
+            return candidate
     return root
 
 

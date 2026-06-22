@@ -9,6 +9,7 @@ Implemented in Python using only the standard library.
 ## Supported harnesses
 
 - Claude Code
+- Codex
 - Pi
 
 More harness adapters can be added later.
@@ -17,17 +18,20 @@ More harness adapters can be added later.
 
 ```bash
 agent-trace --harness claude --session <session-id> <filter>...
+agent-trace --harness codex --session <session-id> <filter>...
 agent-trace --harness pi --session <session-id> <filter>...
 agent-trace --harness claude --session <session-id> --root /path/to/claude/projects <filter>...
+agent-trace --harness codex --session <session-id> --root /path/to/.codex <filter>...
 agent-trace --harness pi --session <session-id> --root /path/to/.pi <filter>...
 ```
 
 ## Harness defaults
 
 - `claude`: `~/.claude/projects`
+- `codex`: `~/.codex`
 - `pi`: `~/.pi`
 
-`--root` overrides the default harness data root. For Claude Code, use the projects directory that contains encoded project folders and session `.jsonl` files. For Pi, use the `.pi` directory.
+`--root` overrides the default harness data root. For Claude Code, use the projects directory that contains encoded project folders and session `.jsonl` files. For Codex, use the `.codex` directory. For Pi, use the `.pi` directory.
 
 ## Filter model
 
@@ -37,7 +41,7 @@ Examples:
 
 ```bash
 # human + assistant messages
-agent-trace --harness claude --session <id> --human --assistant
+agent-trace --harness codex --session <id> --human --assistant
 
 # thinking + Bash commands
 agent-trace --harness claude --session <id> --thinking --bash-command
@@ -64,8 +68,8 @@ Generic `tool` filtering is intentionally skipped for now.
 
 ```bash
 agent-trace \
-  --harness pi \
+  --harness codex \
   --session <session-id> \
-  --root /path/to/.pi \
+  --root /path/to/.codex \
   --bash-command
 ```
