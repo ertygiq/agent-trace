@@ -7,8 +7,10 @@
       <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#000000" flood-opacity="0.35"/>
     </filter>
     <clipPath id="commandClip">
-      <rect x="74" y="91" width="0" height="24">
-        <animate attributeName="width" from="0" to="942" dur="2.0s" begin="0.45s" fill="freeze" calcMode="spline" keySplines="0.22 1 0.36 1"/>
+      <rect x="74" y="91" height="24" width="0">
+        <!-- Steady, linear typing: constant reveal rate, no easing slide. Self-resets each 6.5s loop. -->
+        <animate attributeName="width" dur="6.5s" repeatCount="indefinite" calcMode="linear"
+                 values="0;0;942;942" keyTimes="0;0.0769;0.4308;1"/>
       </rect>
     </clipPath>
     <style>
@@ -26,21 +28,6 @@
       .body { fill: #dbeafe; font: 18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       .bash { fill: #fef3c7; font: 18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       .cursor { fill: #e5e7eb; }
-      .line { opacity: 0; animation: show 0.14s ease-out forwards; }
-      .l1 { animation-delay: 2.72s; }
-      .l2 { animation-delay: 2.80s; }
-      .l3 { animation-delay: 2.94s; }
-      .l4 { animation-delay: 3.02s; }
-      .l5 { animation-delay: 3.16s; }
-      .l6 { animation-delay: 3.24s; }
-      .l7 { animation-delay: 3.38s; }
-      .l8 { animation-delay: 3.46s; }
-      .l9 { animation-delay: 3.60s; }
-      .l10 { animation-delay: 3.68s; }
-      .l11 { animation-delay: 3.82s; }
-      .l12 { animation-delay: 3.98s; }
-      .l13 { animation-delay: 4.06s; }
-      @keyframes show { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
     </style>
   </defs>
 
@@ -61,31 +48,60 @@
     <g clip-path="url(#commandClip)">
       <text class="cmd" x="74" y="108">agent-trace --harness codex --session 019eef26-56e6-7c40-9e51-69e8e156e7fc --all</text>
     </g>
+    <!-- Cursor rides the text edge at the same linear rate, then cleanly vanishes when output begins. -->
     <rect class="cursor" x="74" y="91" width="9" height="20">
-      <animate attributeName="x" from="74" to="1016" dur="2.0s" begin="0.45s" fill="freeze" calcMode="spline" keySplines="0.22 1 0.36 1"/>
-      <set attributeName="visibility" to="hidden" begin="2.55s" fill="freeze"/>
+      <animate attributeName="x" dur="6.5s" repeatCount="indefinite" calcMode="linear"
+               values="74;74;1016;1016" keyTimes="0;0.0769;0.4308;1"/>
+      <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear"
+               values="1;1;0;0" keyTimes="0;0.4308;0.4615;1"/>
     </rect>
 
     <g transform="translate(52 154)">
-      <g class="line l1"><text class="label" x="0" y="0">▌ Human</text><text class="time" x="122" y="0">11:45:31</text></g>
-      <text class="body line l2" x="0" y="30">hi there</text>
+      <g class="line" opacity="0"><text class="label" x="0" y="0">▌ Human</text><text class="time" x="122" y="0">11:45:31</text>
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.4769;0.5015;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.4769;0.5015;1"/></g>
+      <text class="body" x="0" y="30" opacity="0">hi there
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.4923;0.5169;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.4923;0.5169;1"/></text>
 
-      <g class="line l3"><text class="label" x="0" y="82">▌ Assistant</text><text class="time" x="162" y="82">11:45:33</text></g>
-      <text class="body line l4" x="0" y="112">Hi. What are we working on?</text>
+      <g class="line" opacity="0"><text class="label" x="0" y="82">▌ Assistant</text><text class="time" x="162" y="82">11:45:33</text>
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.5169;0.5415;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.5169;0.5415;1"/></g>
+      <text class="body" x="0" y="112" opacity="0">Hi. What are we working on?
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.5323;0.5569;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.5323;0.5569;1"/></text>
 
-      <g class="line l5"><text class="label" x="0" y="164">▌ Human</text><text class="time" x="122" y="164">11:45:47</text></g>
-      <text class="body line l6" x="0" y="194">can you run bash sleep command to sleep for 10 seconds?</text>
+      <g class="line" opacity="0"><text class="label" x="0" y="164">▌ Human</text><text class="time" x="122" y="164">11:45:47</text>
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.5569;0.5815;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.5569;0.5815;1"/></g>
+      <text class="body" x="0" y="194" opacity="0">can you run bash sleep command to sleep for 10 seconds?
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.5723;0.5969;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.5723;0.5969;1"/></text>
 
-      <g class="line l7"><text class="label" x="0" y="246">▌ Bash</text><text class="time" x="102" y="246">11:45:49</text></g>
-      <text class="bash line l8" x="0" y="276">sleep 10</text>
+      <g class="line" opacity="0"><text class="label" x="0" y="246">▌ Bash</text><text class="time" x="102" y="246">11:45:49</text>
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.5969;0.6215;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.5969;0.6215;1"/></g>
+      <text class="bash" x="0" y="276" opacity="0">sleep 10
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.6123;0.6369;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.6123;0.6369;1"/></text>
 
-      <g class="line l9"><text class="label" x="0" y="328">▌ Assistant</text><text class="time" x="162" y="328">11:45:52</text></g>
-      <text class="body line l10" x="0" y="358">`sleep 10` is running. I’ll wait for it to finish.</text>
+      <g class="line" opacity="0"><text class="label" x="0" y="328">▌ Assistant</text><text class="time" x="162" y="328">11:45:52</text>
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.6369;0.6615;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.6369;0.6615;1"/></g>
+      <text class="body" x="0" y="358" opacity="0">`sleep 10` is running. I’ll wait for it to finish.
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.6523;0.6769;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.6523;0.6769;1"/></text>
 
-      <g class="line l11"><text class="label" x="0" y="410">▌ Output</text><text class="time" x="122" y="410">11:45:59</text></g>
+      <g class="line" opacity="0"><text class="label" x="0" y="410">▌ Output</text><text class="time" x="122" y="410">11:45:59</text>
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.6769;0.7015;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.6769;0.7015;1"/></g>
 
-      <g class="line l12"><text class="label" x="0" y="492">▌ Assistant</text><text class="time" x="162" y="492">11:46:00</text></g>
-      <text class="body line l13" x="0" y="522">Done.</text>
+      <g class="line" opacity="0"><text class="label" x="0" y="492">▌ Assistant</text><text class="time" x="162" y="492">11:46:00</text>
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.7015;0.7262;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.7015;0.7262;1"/></g>
+      <text class="body" x="0" y="522" opacity="0">Done.
+        <animate attributeName="opacity" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0;0;1;1" keyTimes="0;0.7169;0.7415;1"/>
+        <animateTransform attributeName="transform" type="translate" dur="6.5s" repeatCount="indefinite" calcMode="linear" values="0 4;0 4;0 0;0 0" keyTimes="0;0.7169;0.7415;1"/></text>
     </g>
   </g>
 </svg>
