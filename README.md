@@ -14,6 +14,14 @@ Implemented in Python using only the standard library.
 
 ![agent-trace terminal demo](assets/agent-trace-demo.svg)
 
+## Installation
+
+With [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv tool install git+https://github.com/ertygiq/agent-trace.git
+```
+
 ## Usage
 
 ```bash

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-trace"
+version = "0.1.0"
+description = "Universal text transcript CLI for agent/harness sessions."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+  { name = "agent-trace contributors" },
+]
+keywords = ["agent", "transcript", "cli", "claude-code", "codex", "pi"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Debuggers",
+  "Topic :: Terminals",
+]
+dependencies = []
+
+[project.scripts]
+agent-trace = "agent_trace:main"
+
+[tool.hatch.build.targets.wheel]
+py-modules = ["agent_trace"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "agent_trace.py",
+  "bin/agent-trace",
+  "README.md",
+  "LICENSE",
+  "assets/agent-trace-demo.svg",
+]

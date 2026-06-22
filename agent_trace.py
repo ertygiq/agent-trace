@@ -1,0 +1,618 @@
+import json
+import re
+import sys
+from pathlib import Path
+
+DEFAULT_ROOTS = {
+    "claude-code": Path.home() / ".claude",
+    "codex": Path.home() / ".codex",
+    "pi": Path.home() / ".pi",
+}
+
+# Accepted --harness values, normalized to the canonical names above.
+HARNESS_ALIASES = {
+    "claude-code": "claude-code",
+    "cc": "claude-code",
+    "claude": "claude-code",
+    "codex": "codex",
+    "pi": "pi",
+}
+
+FILTERS = (
+    "human",
+    "assistant",
+    "thinking",
+    "bash_description",
+    "bash_command",
+    "bash_output",
+)
+
+VALUE_OPTIONS = {"--harness", "--session", "--root"}
+FLAG_OPTIONS = {
+    "--human",
+    "--user",
+    "--assistant",
+    "--thinking",
+    "--bash-description",
+    "--bash-command",
+    "--bash-output",
+    "--bash",
+    "--all",
+    "-h",
+    "--help",
+}
+KNOWN_OPTIONS = VALUE_OPTIONS | FLAG_OPTIONS
+
+USAGE = """Usage: agent-trace --harness HARNESS --session SESSION_ID [--root PATH] FILTER...
+
+Options:
+        --harness HARNESS            Harness type. Supported: claude-code (aliases: cc, claude), codex, pi
+        --session SESSION_ID         Session ID
+        --root PATH                  Optional. Overrides the default harness data root. May point at the harness config directory or the directory that contains session/project folders.
+    -h, --help                       Show help
+
+Filters:
+        --human                      Show human-authored messages
+        --user                       Alias for --human
+        --assistant                  Show assistant text messages
+        --thinking                   Show assistant thinking blocks
+        --bash-description           Show Bash tool-use descriptions
+        --bash-command               Show Bash commands
+        --bash-output                Show Bash command outputs
+        --bash                       Shortcut for --bash-description --bash-command --bash-output
+        --all                        Show all supported categories
+"""
+
+
+class AgentTraceError(Exception):
+    pass
+
+
+class AgentTrace:
+    def __init__(self, argv):
+        self.options = {"filters": []}
+        self.parse(argv)
+
+    def run(self):
+        self.validate()
+        harness = self.options["harness"]
+        if harness == "claude-code":
+            self.render_claude()
+            return
+        if harness == "codex":
+            self.render_codex()
+            return
+        if harness == "pi":
+            self.render_pi()
+            return
+        raise AgentTraceError(f"unsupported harness: {harness!r}. Available harnesses: {available_harnesses_text()}")
+
+    def parse(self, argv):
+        argv = list(argv)
+        self.validate_argv(argv)
+
+        index = 0
+        while index < len(argv):
+            arg = argv[index]
+            option, separator, inline_value = arg.partition("=")
+
+            if option in VALUE_OPTIONS:
+                if separator:
+                    value = inline_value
+                else:
+                    index += 1
+                    value = argv[index]
+                if option == "--harness":
+                    self.options["harness"] = value
+                elif option == "--session":
+                    self.options["session_id"] = value
+                elif option == "--root":
+                    self.options["root"] = value
+            elif option in FLAG_OPTIONS:
+                self.apply_flag(option)
+
+            index += 1
+
+    def validate_argv(self, argv):
+        index = 0
+        while index < len(argv):
+            arg = argv[index]
+
+            if arg.startswith("--"):
+                option, separator, value = arg.partition("=")
+                if option not in KNOWN_OPTIONS:
+                    raise AgentTraceError(f"unknown option: {option}")
+
+                if option in VALUE_OPTIONS:
+                    if separator:
+                        if not present(value):
+                            raise AgentTraceError(f"missing value for {option}")
+                    else:
+                        if index + 1 >= len(argv) or not present(argv[index + 1]) or argv[index + 1].startswith("-"):
+                            raise AgentTraceError(f"missing value for {option}")
+                        index += 1
+                elif separator:
+                    raise AgentTraceError(f"{option} does not accept a value")
+            elif arg.startswith("-"):
+                if arg not in KNOWN_OPTIONS:
+                    raise AgentTraceError(f"unknown option: {arg}")
+            else:
+                raise AgentTraceError(f"unexpected argument: {arg}")
+
+            index += 1
+
+    def apply_flag(self, option):
+        if option in ("-h", "--help"):
+            print(USAGE, end="")
+            raise SystemExit(0)
+        if option in ("--human", "--user"):
+            self.add_filter("human")
+        elif option == "--assistant":
+            self.add_filter("assistant")
+        elif option == "--thinking":
+            self.add_filter("thinking")
+        elif option == "--bash-description":
+            self.add_filter("bash_description")
+        elif option == "--bash-command":
+            self.add_filter("bash_command")
+        elif option == "--bash-output":
+            self.add_filter("bash_output")
+        elif option == "--bash":
+            self.add_filter("bash_description")
+            self.add_filter("bash_command")
+            self.add_filter("bash_output")
+        elif option == "--all":
+            self.options["filters"] = list(FILTERS)
+        else:
+            raise AgentTraceError(f"unknown option: {option}")
+
+    def add_filter(self, filter_name):
+        if filter_name not in FILTERS:
+            raise AgentTraceError(f"unknown filter: {filter_name!r}")
+        if filter_name not in self.options["filters"]:
+            self.options["filters"].append(filter_name)
+
+    def validate(self):
+        if not present(self.options.get("harness")):
+            raise AgentTraceError("missing --harness")
+        if not present(self.options.get("session_id")):
+            raise AgentTraceError("missing --session")
+        canonical = HARNESS_ALIASES.get(self.options["harness"])
+        if canonical is None:
+            raise AgentTraceError(f"unsupported harness: {self.options['harness']!r}. Available harnesses: {available_harnesses_text()}")
+        self.options["harness"] = canonical
+        if not self.options["filters"]:
+            raise AgentTraceError("at least one filter must be specified. Available filters: " + available_filters_text())
+
+    def render_claude(self):
+        session_file = self.find_session_file("claude-code")
+        bash_tool_ids = set()
+
+        with session_file.open("r", encoding="utf-8") as lines:
+            for line_number, line in enumerate(lines, start=1):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise AgentTraceError(f"invalid JSON in {session_file}:{line_number}: {error}") from error
+
+                if record.get("sessionId") != self.options["session_id"]:
+                    continue
+                self.render_claude_record(record, bash_tool_ids)
+
+    def render_claude_record(self, record, bash_tool_ids):
+        timestamp = record.get("timestamp")
+        message = record.get("message") or {}
+        content = message.get("content")
+
+        if record.get("type") == "user":
+            self.render_user(record, timestamp, content, bash_tool_ids)
+        elif record.get("type") == "assistant":
+            self.render_assistant(timestamp, content, bash_tool_ids)
+
+    def render_user(self, record, timestamp, content, bash_tool_ids):
+        human_text = self.extract_human_text(record, content)
+        if human_text is not None:
+            self.emit("human", timestamp, human_text)
+
+        if not isinstance(content, list):
+            return
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_result":
+                continue
+            if block.get("tool_use_id") not in bash_tool_ids:
+                continue
+            self.emit("bash_output", timestamp, extract_tool_result_text(block))
+
+    def extract_human_text(self, record, content):
+        if record.get("isMeta"):
+            return None
+        if "toolUseResult" in record or "sourceToolAssistantUUID" in record:
+            return None
+
+        if isinstance(content, str):
+            return extract_command_message(content) or content
+
+        if not isinstance(content, list):
+            return None
+
+        parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
+        text = "\n\n".join(part for part in parts if present(part))
+        return text if present(text) else None
+
+    def render_assistant(self, timestamp, content, bash_tool_ids):
+        if not isinstance(content, list):
+            return
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                self.emit("assistant", timestamp, str(block.get("text", "")))
+            elif block_type == "thinking":
+                self.emit("thinking", timestamp, extract_thinking_text(block))
+            elif block_type == "tool_use":
+                self.render_tool_use(timestamp, block, bash_tool_ids)
+
+    def render_tool_use(self, timestamp, block, bash_tool_ids):
+        if block.get("name") != "Bash":
+            return
+
+        tool_id = block.get("id")
+        if not present(tool_id):
+            raise AgentTraceError("Bash tool_use is missing id")
+        bash_tool_ids.add(tool_id)
+
+        tool_input = block.get("input")
+        if not isinstance(tool_input, dict):
+            raise AgentTraceError(f"Bash tool_use {tool_id} has invalid input")
+        if "command" not in tool_input:
+            raise AgentTraceError(f"Bash tool_use {tool_id} is missing input.command")
+
+        if "description" in tool_input:
+            self.emit("bash_description", timestamp, str(tool_input["description"]))
+        self.emit("bash_command", timestamp, str(tool_input["command"]))
+
+    def emit(self, filter_name, timestamp, text, allow_empty=False):
+        if filter_name not in self.options["filters"]:
+            return
+        if not allow_empty and not present(text):
+            return
+
+        glyph, label = BLOCK_STYLES.get(filter_name, ("▌", filter_name.replace("_", " ").capitalize()))
+        clock = format_clock(timestamp)
+        header = f"{glyph} {label}"
+        if clock:
+            header = f"{header}   {clock}"
+        print(header)
+        print(text)
+        print()
+
+    def render_codex(self):
+        session_file = self.find_session_file("codex")
+        bash_call_ids = set()
+        seen_session_meta = False
+
+        with session_file.open("r", encoding="utf-8") as lines:
+            for line_number, line in enumerate(lines, start=1):
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise AgentTraceError(f"invalid JSON in {session_file}:{line_number}: {error}") from error
+
+                if entry.get("type") == "session_meta":
+                    seen_session_meta = True
+                    payload = entry.get("payload") or {}
+                    if payload.get("id") != self.options["session_id"]:
+                        raise AgentTraceError(f"session file id mismatch: expected {self.options['session_id']}, got {payload.get('id')}")
+                    continue
+
+                self.render_codex_entry(entry, bash_call_ids)
+
+        if not seen_session_meta:
+            raise AgentTraceError(f"Codex session file is missing session_meta: {session_file}")
+
+    def render_codex_entry(self, entry, bash_call_ids):
+        timestamp = entry.get("timestamp")
+
+        if entry.get("type") == "event_msg":
+            payload = entry.get("payload") or {}
+            if payload.get("type") == "user_message":
+                self.emit("human", timestamp, str(payload.get("message", "")))
+            return
+
+        if entry.get("type") == "response_item":
+            payload = entry.get("payload") or {}
+            payload_type = payload.get("type")
+
+            if payload_type == "message":
+                if payload.get("role") == "assistant":
+                    self.emit("assistant", timestamp, extract_codex_message_text(payload.get("content")))
+            elif payload_type == "reasoning":
+                self.emit("thinking", timestamp, extract_codex_reasoning_text(payload))
+            elif payload_type == "function_call":
+                self.render_codex_function_call(timestamp, payload, bash_call_ids)
+            elif payload_type == "function_call_output" and payload.get("call_id") in bash_call_ids:
+                raw_output = payload.get("output")
+                self.emit("bash_output", timestamp, extract_codex_bash_output(raw_output), allow_empty=is_codex_terminal_bash_output(raw_output))
+
+    def render_codex_function_call(self, timestamp, payload, bash_call_ids):
+        call_name = payload.get("name")
+        if call_name not in ("exec_command", "write_stdin"):
+            return
+
+        call_id = payload.get("call_id")
+        if not present(call_id):
+            raise AgentTraceError(f"Codex {call_name} function_call is missing call_id")
+        bash_call_ids.add(call_id)
+
+        if call_name != "exec_command":
+            return
+
+        arguments = parse_codex_arguments(payload.get("arguments"), call_id)
+        if "cmd" not in arguments:
+            raise AgentTraceError(f"Codex exec_command {call_id} is missing arguments.cmd")
+        self.emit("bash_command", timestamp, str(arguments["cmd"]))
+
+    def render_pi(self):
+        session_file = self.find_session_file("pi")
+        bash_tool_ids = set()
+
+        with session_file.open("r", encoding="utf-8") as lines:
+            for line_number, line in enumerate(lines, start=1):
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise AgentTraceError(f"invalid JSON in {session_file}:{line_number}: {error}") from error
+
+                self.render_pi_entry(entry, bash_tool_ids)
+
+    def render_pi_entry(self, entry, bash_tool_ids):
+        if entry.get("type") == "session":
+            if entry.get("id") != self.options["session_id"]:
+                raise AgentTraceError(f"session file id mismatch: expected {self.options['session_id']}, got {entry.get('id')}")
+            return
+        if entry.get("type") != "message":
+            return
+
+        timestamp = entry.get("timestamp")
+        message = entry.get("message") or {}
+        role = message.get("role")
+        content = message.get("content")
+
+        if role == "user":
+            self.emit("human", timestamp, extract_text_content(content))
+        elif role == "assistant":
+            self.render_pi_assistant(timestamp, content, bash_tool_ids)
+        elif role == "toolResult":
+            if message.get("toolName") == "bash" or message.get("toolCallId") in bash_tool_ids:
+                self.emit("bash_output", timestamp, extract_text_content(content))
+        elif role == "bashExecution":
+            self.emit("bash_command", timestamp, str(message.get("command", "")))
+            self.emit("bash_output", timestamp, str(message.get("output", "")))
+
+    def render_pi_assistant(self, timestamp, content, bash_tool_ids):
+        if not isinstance(content, list):
+            return
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                self.emit("assistant", timestamp, str(block.get("text", "")))
+            elif block_type == "thinking":
+                self.emit("thinking", timestamp, extract_thinking_text(block))
+            elif block_type == "toolCall" and block.get("name") == "bash":
+                tool_id = block.get("id")
+                if not present(tool_id):
+                    raise AgentTraceError("Pi bash toolCall is missing id")
+                bash_tool_ids.add(tool_id)
+                arguments = block.get("arguments")
+                if not isinstance(arguments, dict):
+                    raise AgentTraceError(f"Pi bash toolCall {tool_id} has invalid arguments")
+                if "command" not in arguments:
+                    raise AgentTraceError(f"Pi bash toolCall {tool_id} is missing arguments.command")
+                if "description" in arguments:
+                    self.emit("bash_description", timestamp, str(arguments["description"]))
+                self.emit("bash_command", timestamp, str(arguments["command"]))
+
+    def find_session_file(self, harness):
+        root = Path(self.options.get("root") or DEFAULT_ROOTS[harness]).expanduser()
+        if not root.exists():
+            raise AgentTraceError(f"root does not exist: {root}")
+        if not root.is_dir():
+            raise AgentTraceError(f"root is not a directory: {root}")
+
+        pattern = f"{self.options['session_id']}.jsonl" if harness == "claude-code" else f"*{self.options['session_id']}*.jsonl"
+        search_root = harness_sessions_root(harness, root)
+        matches = list(search_root.rglob(pattern))
+        if not matches:
+            raise AgentTraceError(f"session not found under {search_root}: {self.options['session_id']}")
+        if len(matches) > 1:
+            raise AgentTraceError("multiple session files found: " + ", ".join(str(match) for match in matches))
+        return matches[0]
+
+
+def parse_codex_arguments(value, call_id):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise AgentTraceError(f"Codex function_call {call_id} has invalid JSON arguments: {error}") from error
+        if isinstance(parsed, dict):
+            return parsed
+    raise AgentTraceError(f"Codex function_call {call_id} has invalid arguments")
+
+
+def extract_codex_message_text(content):
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+
+    parts = []
+    for block in content:
+        if isinstance(block, dict):
+            value = block.get("text") or block.get("input_text") or block.get("output_text")
+        else:
+            value = block
+        if value is not None:
+            parts.append(str(value))
+    return "\n".join(parts)
+
+
+def extract_codex_bash_output(output):
+    if output is None:
+        return ""
+    text = str(output)
+    marker = "\nOutput:\n"
+    if marker in text:
+        return text.split(marker, 1)[1]
+    if text.startswith("Output:\n"):
+        return text[len("Output:\n"):]
+    return text
+
+
+def is_codex_terminal_bash_output(output):
+    if output is None:
+        return False
+    text = str(output)
+    return text.startswith("Exit code:") or "\nProcess exited with code " in text
+
+
+def extract_codex_reasoning_text(payload):
+    summary = payload.get("summary")
+    if isinstance(summary, list):
+        text = extract_codex_message_text(summary)
+        if present(text):
+            return text
+    elif present(summary):
+        return str(summary)
+    if present(payload.get("text")):
+        return str(payload["text"])
+    if present(payload.get("encrypted_content")):
+        return "[reasoning block present but plaintext reasoning is not available]"
+    return "[reasoning block present but no plaintext reasoning field]"
+
+
+def extract_command_message(text):
+    command_name = extract_tag(text, "command-name")
+    command_args = extract_tag(text, "command-args")
+    parts = [part for part in (command_name, command_args) if part is not None]
+    return "\n".join(parts) if parts else None
+
+
+def extract_tag(text, tag):
+    match = re.search(rf"<{re.escape(tag)}>(.*?)</{re.escape(tag)}>", text, re.DOTALL)
+    return match.group(1) if match else None
+
+
+def extract_tool_result_text(block):
+    return extract_text_content(block.get("content"))
+
+
+def extract_text_content(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for entry in content:
+            if isinstance(entry, dict):
+                value = entry.get("text")
+            else:
+                value = entry
+            if value is not None:
+                parts.append(str(value))
+        return "\n".join(parts)
+    return str(content)
+
+
+def harness_sessions_root(harness, root):
+    if harness == "claude-code":
+        candidate = root / "projects"
+        if candidate.is_dir():
+            return candidate
+    elif harness == "codex":
+        candidate = root / "sessions"
+        if candidate.is_dir():
+            return candidate
+    elif harness == "pi":
+        candidate = root / "agent" / "sessions"
+        if candidate.is_dir():
+            return candidate
+    return root
+
+
+def extract_thinking_text(block):
+    text = block.get("thinking") or block.get("text")
+    if present(text):
+        return text
+    return "[thinking block present but no plaintext thinking field]"
+
+
+def available_harnesses_text():
+    return ", ".join(sorted(DEFAULT_ROOTS))
+
+
+def available_filters_text():
+    return ", ".join(
+        (
+            "--human",
+            "--assistant",
+            "--thinking",
+            "--bash-description",
+            "--bash-command",
+            "--bash-output",
+            "--bash",
+            "--all",
+        )
+    )
+
+
+BLOCK_STYLES = {
+    "human": ("▌", "Human"),
+    "assistant": ("▌", "Assistant"),
+    "thinking": ("▌", "Thinking"),
+    "bash_description": ("▌", "Bash note"),
+    "bash_command": ("▌", "Bash"),
+    "bash_output": ("▌", "Output"),
+}
+
+CLOCK_PATTERN = re.compile(r"(\d{2}:\d{2}:\d{2})")
+
+
+def format_clock(timestamp):
+    if not present(timestamp):
+        return ""
+    match = CLOCK_PATTERN.search(str(timestamp))
+    if match:
+        return match.group(1)
+    return str(timestamp)
+
+
+def present(value):
+    return value is not None and value != ""
+
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    try:
+        AgentTrace(argv).run()
+    except BrokenPipeError:
+        return 0
+    except AgentTraceError as error:
+        print(f"agent-trace: {error}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
