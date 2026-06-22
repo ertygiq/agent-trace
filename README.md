@@ -1,8 +1,8 @@
 # agent-trace
 
-Universal text transcript CLI for agent/harness sessions. Output is text only. No HTML/TUI.
+Universal text transcript CLI for agent/harness sessions. Output is text only — no HTML, no TUI.
 
-Useful for inspecting agent runs, debugging what happened, and evaluating agent results — including handing filtered transcripts to another agent for review.
+Useful for inspecting agent runs, debugging what happened, and evaluating results — including handing a filtered transcript to another agent for review.
 
 Implemented in Python using only the standard library.
 
@@ -12,64 +12,59 @@ Implemented in Python using only the standard library.
 - Codex
 - Pi
 
-More harness adapters can be added later.
-
-## CLI shape
+## Usage
 
 ```bash
-agent-trace --harness claude --session <session-id> <filter>...
-agent-trace --harness codex --session <session-id> <filter>...
-agent-trace --harness pi --session <session-id> <filter>...
-agent-trace --harness claude --session <session-id> --root /path/to/claude/projects <filter>...
-agent-trace --harness codex --session <session-id> --root /path/to/.codex <filter>...
-agent-trace --harness pi --session <session-id> --root /path/to/.pi <filter>...
+agent-trace --harness <harness> --session <session-id> <filters...>
 ```
 
-## Harness defaults
+Three things to specify:
 
-- `claude`: `~/.claude/projects`
-- `codex`: `~/.codex`
-- `pi`: `~/.pi`
+- **`--harness`** — which harness produced the session: `claude-code` (aliases: `cc`, `claude`), `codex`, or `pi`.
+- **`--session`** — the session id to read.
+- **filters** — what to include in the output (at least one required, see below).
 
-`--root` overrides the default harness data root. For Claude Code, use the projects directory that contains encoded project folders and session `.jsonl` files. For Codex, use the `.codex` directory. For Pi, use the `.pi` directory.
+```bash
+agent-trace --harness claude-code --session abc123 --human --assistant
+```
 
-## Filter model
+## Filters
 
-Filters select event categories. At least one filter is required. Multiple filters are combined as union/OR.
+Filters select which event categories appear in the transcript. At least one is required; multiple filters combine as a union (OR).
 
-Examples:
+| Filter | Shows |
+| --- | --- |
+| `--human` | Human-authored messages (alias: `--user`) |
+| `--assistant` | Assistant text messages |
+| `--thinking` | Assistant thinking blocks |
+| `--bash-command` | Bash command text |
+| `--bash-output` | Bash command output |
+| `--bash-description` | Harness-provided description for a Bash command, when available |
+| `--bash` | Shortcut for the three `--bash-*` filters |
+| `--all` | All supported categories |
 
 ```bash
 # human + assistant messages
-agent-trace --harness codex --session <id> --human --assistant
+agent-trace --harness codex --session abc123 --human --assistant
 
-# thinking + Bash commands
-agent-trace --harness claude --session <id> --thinking --bash-command
+# thinking + bash commands
+agent-trace --harness claude-code --session abc123 --thinking --bash-command
 
-# Bash command, description, and output
-agent-trace --harness claude --session <id> --bash
+# everything bash: description, command, and output
+agent-trace --harness claude-code --session abc123 --bash
 ```
 
-Filters:
+## Harness data roots
 
-- `--human`: human-authored messages only
-- `--user`: alias for `--human`
-- `--assistant`: assistant text messages only
-- `--thinking`: assistant thinking blocks
-- `--bash-description`: harness-provided description for a Bash command, when available
-- `--bash-command`: Bash command text
-- `--bash-output`: Bash command output/result
-- `--bash`: shortcut for `--bash-description --bash-command --bash-output`
-- `--all`: all supported categories
+Each harness has a default location agent-trace reads from:
 
-Generic `tool` filtering is intentionally skipped for now.
+- `claude-code`: `~/.claude`
+- `codex`: `~/.codex`
+- `pi`: `~/.pi`
 
-## Example with custom root
+Use `--root` to override the default — for example, to read sessions from another machine's exported data. The path may be either the harness config directory or the directory that directly contains session/project folders.
 
 ```bash
-agent-trace \
-  --harness codex \
-  --session <session-id> \
-  --root /path/to/.codex \
-  --bash-command
+agent-trace --harness codex --session abc123 --root /path/to/.codex --bash-command
+agent-trace --harness claude-code --session abc123 --root /path/to/.claude --human
 ```

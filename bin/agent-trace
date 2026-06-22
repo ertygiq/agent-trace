@@ -6,9 +6,18 @@ import sys
 from pathlib import Path
 
 DEFAULT_ROOTS = {
-    "claude": Path.home() / ".claude" / "projects",
+    "claude-code": Path.home() / ".claude",
     "codex": Path.home() / ".codex",
     "pi": Path.home() / ".pi",
+}
+
+# Accepted --harness values, normalized to the canonical names above.
+HARNESS_ALIASES = {
+    "claude-code": "claude-code",
+    "cc": "claude-code",
+    "claude": "claude-code",
+    "codex": "codex",
+    "pi": "pi",
 }
 
 FILTERS = (
@@ -39,9 +48,9 @@ KNOWN_OPTIONS = VALUE_OPTIONS | FLAG_OPTIONS
 USAGE = """Usage: agent-trace --harness HARNESS --session SESSION_ID [--root PATH] FILTER...
 
 Options:
-        --harness HARNESS            Harness type. Supported: claude, codex, pi
+        --harness HARNESS            Harness type. Supported: claude-code (aliases: cc, claude), codex, pi
         --session SESSION_ID         Session ID
-        --root PATH                  Optional. Overrides the default harness data root. For Claude Code, use the projects directory. For Codex and Pi, use the harness config directory.
+        --root PATH                  Optional. Overrides the default harness data root. May point at the harness config directory or the directory that contains session/project folders.
     -h, --help                       Show help
 
 Filters:
@@ -69,7 +78,7 @@ class AgentTrace:
     def run(self):
         self.validate()
         harness = self.options["harness"]
-        if harness == "claude":
+        if harness == "claude-code":
             self.render_claude()
             return
         if harness == "codex":
@@ -170,13 +179,15 @@ class AgentTrace:
             raise AgentTraceError("missing --harness")
         if not present(self.options.get("session_id")):
             raise AgentTraceError("missing --session")
-        if self.options["harness"] not in DEFAULT_ROOTS:
+        canonical = HARNESS_ALIASES.get(self.options["harness"])
+        if canonical is None:
             raise AgentTraceError(f"unsupported harness: {self.options['harness']!r}. Available harnesses: {available_harnesses_text()}")
+        self.options["harness"] = canonical
         if not self.options["filters"]:
             raise AgentTraceError("at least one filter must be specified. Available filters: " + available_filters_text())
 
     def render_claude(self):
-        session_file = self.find_session_file("claude")
+        session_file = self.find_session_file("claude-code")
         bash_tool_ids = set()
 
         with session_file.open("r", encoding="utf-8") as lines:
@@ -273,7 +284,12 @@ class AgentTrace:
         if not allow_empty and not present(text):
             return
 
-        print(f"## {filter_name.replace('_', '-')} {timestamp}")
+        glyph, label = BLOCK_STYLES.get(filter_name, ("▌", filter_name.replace("_", " ").capitalize()))
+        clock = format_clock(timestamp)
+        header = f"{glyph} {label}"
+        if clock:
+            header = f"{header}   {clock}"
+        print(header)
         print(text)
         print()
 
@@ -413,7 +429,7 @@ class AgentTrace:
         if not root.is_dir():
             raise AgentTraceError(f"root is not a directory: {root}")
 
-        pattern = f"{self.options['session_id']}.jsonl" if harness == "claude" else f"*{self.options['session_id']}*.jsonl"
+        pattern = f"{self.options['session_id']}.jsonl" if harness == "claude-code" else f"*{self.options['session_id']}*.jsonl"
         search_root = harness_sessions_root(harness, root)
         matches = list(search_root.rglob(pattern))
         if not matches:
@@ -520,11 +536,15 @@ def extract_text_content(content):
 
 
 def harness_sessions_root(harness, root):
-    if harness == "codex":
+    if harness == "claude-code":
+        candidate = root / "projects"
+        if candidate.is_dir():
+            return candidate
+    elif harness == "codex":
         candidate = root / "sessions"
         if candidate.is_dir():
             return candidate
-    if harness == "pi":
+    elif harness == "pi":
         candidate = root / "agent" / "sessions"
         if candidate.is_dir():
             return candidate
@@ -555,6 +575,27 @@ def available_filters_text():
             "--all",
         )
     )
+
+
+BLOCK_STYLES = {
+    "human": ("▌", "Human"),
+    "assistant": ("▌", "Assistant"),
+    "thinking": ("▌", "Thinking"),
+    "bash_description": ("▌", "Bash note"),
+    "bash_command": ("▌", "Bash"),
+    "bash_output": ("▌", "Output"),
+}
+
+CLOCK_PATTERN = re.compile(r"(\d{2}:\d{2}:\d{2})")
+
+
+def format_clock(timestamp):
+    if not present(timestamp):
+        return ""
+    match = CLOCK_PATTERN.search(str(timestamp))
+    if match:
+        return match.group(1)
+    return str(timestamp)
 
 
 def present(value):
