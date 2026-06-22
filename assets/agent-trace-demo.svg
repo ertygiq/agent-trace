@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="720" viewBox="0 0 1100 720" role="img" aria-labelledby="title desc">
+  <title id="title">agent-trace terminal demo</title>
+  <desc id="desc">Animated terminal showing the agent-trace command being typed and transcript output appearing.</desc>
+
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <clipPath id="commandClip">
+      <rect x="74" y="91" width="0" height="24">
+        <animate attributeName="width" from="0" to="942" dur="2.0s" begin="0.45s" fill="freeze" calcMode="spline" keySplines="0.22 1 0.36 1"/>
+      </rect>
+    </clipPath>
+    <style>
+      .bg { fill: #0b1020; }
+      .terminal { fill: #101827; stroke: #263449; stroke-width: 1; }
+      .bar { fill: #162033; }
+      .dot-red { fill: #ff5f57; }
+      .dot-yellow { fill: #ffbd2e; }
+      .dot-green { fill: #28c840; }
+      .title { fill: #8ea0bb; font: 500 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .prompt { fill: #6ee7b7; font: 15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .cmd { fill: #e5e7eb; font: 15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .label { fill: #f8fafc; font: 700 18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .time { fill: #94a3b8; font: 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .body { fill: #dbeafe; font: 18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .bash { fill: #fef3c7; font: 18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .cursor { fill: #e5e7eb; }
+      .line { opacity: 0; animation: show 0.14s ease-out forwards; }
+      .l1 { animation-delay: 2.72s; }
+      .l2 { animation-delay: 2.80s; }
+      .l3 { animation-delay: 2.94s; }
+      .l4 { animation-delay: 3.02s; }
+      .l5 { animation-delay: 3.16s; }
+      .l6 { animation-delay: 3.24s; }
+      .l7 { animation-delay: 3.38s; }
+      .l8 { animation-delay: 3.46s; }
+      .l9 { animation-delay: 3.60s; }
+      .l10 { animation-delay: 3.68s; }
+      .l11 { animation-delay: 3.82s; }
+      .l12 { animation-delay: 3.98s; }
+      .l13 { animation-delay: 4.06s; }
+      @keyframes show { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1100" height="720"/>
+  <circle cx="920" cy="78" r="190" fill="#2563eb" opacity="0.16"/>
+  <circle cx="180" cy="640" r="230" fill="#14b8a6" opacity="0.12"/>
+
+  <g filter="url(#shadow)">
+    <rect class="terminal" x="34" y="34" width="1032" height="652" rx="18"/>
+    <rect class="bar" x="34" y="34" width="1032" height="44" rx="18"/>
+    <rect class="bar" x="34" y="60" width="1032" height="18"/>
+    <circle class="dot-red" cx="61" cy="56" r="7"/>
+    <circle class="dot-yellow" cx="84" cy="56" r="7"/>
+    <circle class="dot-green" cx="107" cy="56" r="7"/>
+    <text class="title" x="550" y="61" text-anchor="middle">agent-trace demo</text>
+
+    <text class="prompt" x="52" y="108">$</text>
+    <g clip-path="url(#commandClip)">
+      <text class="cmd" x="74" y="108">agent-trace --harness codex --session 019eef26-56e6-7c40-9e51-69e8e156e7fc --all</text>
+    </g>
+    <rect class="cursor" x="74" y="91" width="9" height="20">
+      <animate attributeName="x" from="74" to="1016" dur="2.0s" begin="0.45s" fill="freeze" calcMode="spline" keySplines="0.22 1 0.36 1"/>
+      <set attributeName="visibility" to="hidden" begin="2.55s" fill="freeze"/>
+    </rect>
+
+    <g transform="translate(52 154)">
+      <g class="line l1"><text class="label" x="0" y="0">▌ Human</text><text class="time" x="122" y="0">11:45:31</text></g>
+      <text class="body line l2" x="0" y="30">hi there</text>
+
+      <g class="line l3"><text class="label" x="0" y="82">▌ Assistant</text><text class="time" x="162" y="82">11:45:33</text></g>
+      <text class="body line l4" x="0" y="112">Hi. What are we working on?</text>
+
+      <g class="line l5"><text class="label" x="0" y="164">▌ Human</text><text class="time" x="122" y="164">11:45:47</text></g>
+      <text class="body line l6" x="0" y="194">can you run bash sleep command to sleep for 10 seconds?</text>
+
+      <g class="line l7"><text class="label" x="0" y="246">▌ Bash</text><text class="time" x="102" y="246">11:45:49</text></g>
+      <text class="bash line l8" x="0" y="276">sleep 10</text>
+
+      <g class="line l9"><text class="label" x="0" y="328">▌ Assistant</text><text class="time" x="162" y="328">11:45:52</text></g>
+      <text class="body line l10" x="0" y="358">`sleep 10` is running. I’ll wait for it to finish.</text>
+
+      <g class="line l11"><text class="label" x="0" y="410">▌ Output</text><text class="time" x="122" y="410">11:45:59</text></g>
+
+      <g class="line l12"><text class="label" x="0" y="492">▌ Assistant</text><text class="time" x="162" y="492">11:46:00</text></g>
+      <text class="body line l13" x="0" y="522">Done.</text>
+    </g>
+  </g>
+</svg>

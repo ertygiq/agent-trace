@@ -2,7 +2,7 @@
 
 Universal text transcript CLI for agent/harness sessions. Output is text only — no HTML, no TUI.
 
-Useful for inspecting agent runs, debugging what happened, and evaluating results — including handing a filtered transcript to another agent for review.
+Useful for inspecting agent runs, debugging what happened, and evaluating results — including handing a transcript to another agent for review.
 
 Implemented in Python using only the standard library.
 
@@ -11,6 +11,8 @@ Implemented in Python using only the standard library.
 - Claude Code
 - Codex
 - Pi
+
+![agent-trace terminal demo](assets/agent-trace-demo.svg)
 
 ## Usage
 
