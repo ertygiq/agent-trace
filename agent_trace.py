@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 DEFAULT_ROOTS = {
     "claude-code": Path.home() / ".claude",
     "codex": Path.home() / ".codex",
+    "cursor": Path.home() / ".cursor",
     "pi": Path.home() / ".pi",
 }
 
@@ -15,8 +17,12 @@ HARNESS_ALIASES = {
     "cc": "claude-code",
     "claude": "claude-code",
     "codex": "codex",
+    "cursor": "cursor",
     "pi": "pi",
 }
+
+# Harnesses whose session file is named exactly after the session id.
+EXACT_SESSION_FILENAME_HARNESSES = ("claude-code", "cursor")
 
 FILTERS = (
     "human",
@@ -26,6 +32,22 @@ FILTERS = (
     "bash_command",
     "bash_output",
 )
+
+FILTER_FLAGS = {
+    "human": "--human",
+    "assistant": "--assistant",
+    "thinking": "--thinking",
+    "bash_description": "--bash-description",
+    "bash_command": "--bash-command",
+    "bash_output": "--bash-output",
+}
+
+# Categories a harness never records, so no filter can ever produce output for them.
+UNSUPPORTED_FILTERS = {
+    # Cursor transcripts store the assistant's reasoning inline in its text blocks and
+    # keep no tool results at all.
+    "cursor": ("thinking", "bash_output"),
+}
 
 VALUE_OPTIONS = {"--harness", "--session", "--root"}
 FLAG_OPTIONS = {
@@ -46,7 +68,7 @@ KNOWN_OPTIONS = VALUE_OPTIONS | FLAG_OPTIONS
 USAGE = """Usage: agent-trace --harness HARNESS --session SESSION_ID [--root PATH] FILTER...
 
 Options:
-        --harness HARNESS            Harness type. Supported: claude-code (aliases: cc, claude), codex, pi
+        --harness HARNESS            Harness type. Supported: claude-code (aliases: cc, claude), codex, cursor, pi
         --session SESSION_ID         Session ID
         --root PATH                  Optional. Overrides the default harness data root. May point at the harness config directory or the directory that contains session/project folders.
     -h, --help                       Show help
@@ -61,6 +83,10 @@ Filters:
         --bash-output                Show Bash command outputs
         --bash                       Shortcut for --bash-description --bash-command --bash-output
         --all                        Show all supported categories
+
+Notes:
+        Not every harness records every category. Cursor transcripts keep no tool results and
+        no separate thinking blocks, so --bash-output and --thinking stay empty for cursor.
 """
 
 
@@ -81,6 +107,9 @@ class AgentTrace:
             return
         if harness == "codex":
             self.render_codex()
+            return
+        if harness == "cursor":
+            self.render_cursor()
             return
         if harness == "pi":
             self.render_pi()
@@ -183,6 +212,11 @@ class AgentTrace:
         self.options["harness"] = canonical
         if not self.options["filters"]:
             raise AgentTraceError("at least one filter must be specified. Available filters: " + available_filters_text())
+
+        unsupported = UNSUPPORTED_FILTERS.get(canonical, ())
+        if unsupported and all(name in unsupported for name in self.options["filters"]):
+            flags = ", ".join(FILTER_FLAGS[name] for name in unsupported)
+            raise AgentTraceError(f"{canonical} transcripts do not record: {flags}")
 
     def render_claude(self):
         session_file = self.find_session_file("claude-code")
@@ -357,6 +391,57 @@ class AgentTrace:
             raise AgentTraceError(f"Codex exec_command {call_id} is missing arguments.cmd")
         self.emit("bash_command", timestamp, str(arguments["cmd"]))
 
+    def render_cursor(self):
+        session_file = self.find_session_file("cursor")
+
+        with session_file.open("r", encoding="utf-8") as lines:
+            for line_number, line in enumerate(lines, start=1):
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise AgentTraceError(f"invalid JSON in {session_file}:{line_number}: {error}") from error
+
+                self.render_cursor_entry(entry)
+
+    def render_cursor_entry(self, entry):
+        # Turn markers such as {"type": "turn_ended", ...} carry no role and no content.
+        role = entry.get("role")
+        if role not in ("user", "assistant"):
+            return
+
+        message = entry.get("message") or {}
+        content = message.get("content")
+        if not isinstance(content, list):
+            return
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                text = str(block.get("text", ""))
+                if role == "user":
+                    # Cursor has no record-level timestamps; some user turns carry one inline.
+                    self.emit("human", extract_tag(text, "timestamp"), extract_cursor_user_text(text))
+                else:
+                    self.emit("assistant", None, text)
+            elif block_type == "tool_use" and role == "assistant":
+                self.render_cursor_tool_use(block)
+
+    def render_cursor_tool_use(self, block):
+        if block.get("name") != "Shell":
+            return
+
+        tool_input = block.get("input")
+        if not isinstance(tool_input, dict):
+            raise AgentTraceError("Cursor Shell tool_use has invalid input")
+        if "command" not in tool_input:
+            raise AgentTraceError("Cursor Shell tool_use is missing input.command")
+
+        if "description" in tool_input:
+            self.emit("bash_description", None, str(tool_input["description"]))
+        self.emit("bash_command", None, str(tool_input["command"]))
+
     def render_pi(self):
         session_file = self.find_session_file("pi")
         bash_tool_ids = set()
@@ -427,7 +512,10 @@ class AgentTrace:
         if not root.is_dir():
             raise AgentTraceError(f"root is not a directory: {root}")
 
-        pattern = f"{self.options['session_id']}.jsonl" if harness == "claude-code" else f"*{self.options['session_id']}*.jsonl"
+        if harness in EXACT_SESSION_FILENAME_HARNESSES:
+            pattern = f"{self.options['session_id']}.jsonl"
+        else:
+            pattern = f"*{self.options['session_id']}*.jsonl"
         search_root = harness_sessions_root(harness, root)
         matches = list(search_root.rglob(pattern))
         if not matches:
@@ -501,6 +589,13 @@ def extract_codex_reasoning_text(payload):
     return "[reasoning block present but no plaintext reasoning field]"
 
 
+def extract_cursor_user_text(text):
+    # Cursor wraps the typed message in <user_query> and prepends harness-injected context
+    # (timestamp, attached files) as sibling tags.
+    query = extract_tag(text, "user_query")
+    return query.strip() if query is not None else text
+
+
 def extract_command_message(text):
     command_name = extract_tag(text, "command-name")
     command_args = extract_tag(text, "command-args")
@@ -542,6 +637,10 @@ def harness_sessions_root(harness, root):
         candidate = root / "sessions"
         if candidate.is_dir():
             return candidate
+    elif harness == "cursor":
+        candidate = root / "projects"
+        if candidate.is_dir():
+            return candidate
     elif harness == "pi":
         candidate = root / "agent" / "sessions"
         if candidate.is_dir():
@@ -561,18 +660,7 @@ def available_harnesses_text():
 
 
 def available_filters_text():
-    return ", ".join(
-        (
-            "--human",
-            "--assistant",
-            "--thinking",
-            "--bash-description",
-            "--bash-command",
-            "--bash-output",
-            "--bash",
-            "--all",
-        )
-    )
+    return ", ".join(tuple(FILTER_FLAGS[name] for name in FILTERS) + ("--bash", "--all"))
 
 
 BLOCK_STYLES = {
@@ -605,7 +693,13 @@ def main(argv=None):
         argv = sys.argv[1:]
     try:
         AgentTrace(argv).run()
+        # Flush here so a closed downstream pipe (`| head`) surfaces inside this handler
+        # rather than during interpreter shutdown, where nothing can catch it.
+        sys.stdout.flush()
     except BrokenPipeError:
+        # Point stdout at /dev/null so the shutdown flush of any bytes still buffered has
+        # somewhere harmless to go instead of printing to stderr.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
     except AgentTraceError as error:
         print(f"agent-trace: {error}", file=sys.stderr)

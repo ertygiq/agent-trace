@@ -12,7 +12,7 @@ license = "MIT"
 authors = [
   { name = "agent-trace contributors" },
 ]
-keywords = ["agent", "transcript", "cli", "claude-code", "codex", "pi"]
+keywords = ["agent", "transcript", "cli", "claude-code", "codex", "cursor", "pi"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
