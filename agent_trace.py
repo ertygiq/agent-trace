@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -43,11 +44,7 @@ FILTER_FLAGS = {
 }
 
 # Categories a harness never records, so no filter can ever produce output for them.
-UNSUPPORTED_FILTERS = {
-    # Cursor transcripts store the assistant's reasoning inline in its text blocks and
-    # keep no tool results at all.
-    "cursor": ("thinking", "bash_output"),
-}
+UNSUPPORTED_FILTERS = {}
 
 VALUE_OPTIONS = {"--harness", "--session", "--root"}
 FLAG_OPTIONS = {
@@ -87,8 +84,8 @@ Filters:
         --all                        Show all supported categories
 
 Notes:
-        Not every harness records every category. Cursor transcripts keep no tool results and
-        no separate thinking blocks, so --bash-output and --thinking stay empty for cursor.
+        Not every harness records every category. Cursor database extraction uses Cursor's
+        undocumented local schema and falls back to its less detailed JSONL transcript.
 """
 
 
@@ -409,6 +406,24 @@ class AgentTrace:
         self.emit("bash_command", timestamp, str(arguments["cmd"]))
 
     def render_cursor(self):
+        # The JSONL transcript is an intentionally lossy export: it has no assistant
+        # timestamps and may merge thinking with answer text. Cursor's UI state database
+        # retains separate bubbles, so prefer it when available and retain JSONL as a
+        # portable fallback for exports and future unknown database layouts.
+        database = find_cursor_state_database(self.options.get("root"))
+        if database is not None:
+            try:
+                entries = load_cursor_database_entries(database, self.options["session_id"])
+            except (OSError, sqlite3.Error, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                entries = None
+            if entries is not None:
+                for entry in entries:
+                    self.render_cursor_database_entry(entry)
+                return
+
+        self.render_cursor_jsonl()
+
+    def render_cursor_jsonl(self):
         session_file = self.find_session_file("cursor")
 
         with session_file.open("r", encoding="utf-8") as lines:
@@ -419,6 +434,44 @@ class AgentTrace:
                     raise AgentTraceError(f"invalid JSON in {session_file}:{line_number}: {error}") from error
 
                 self.render_cursor_entry(entry)
+
+    def render_cursor_database_entry(self, entry):
+        timestamp = entry.get("createdAt")
+        role = entry.get("type")
+
+        if role == 1:
+            self.emit("human", timestamp, str(entry.get("text", "")))
+            return
+        if role != 2:
+            return
+
+        thinking = entry.get("thinking")
+        if isinstance(thinking, dict):
+            self.emit("thinking", timestamp, extract_thinking_text(thinking))
+        elif present(thinking):
+            self.emit("thinking", timestamp, str(thinking))
+
+        self.emit("assistant", timestamp, str(entry.get("text", "")))
+        self.render_cursor_database_tool(entry, timestamp)
+
+    def render_cursor_database_tool(self, entry, timestamp):
+        tool = entry.get("toolFormerData")
+        if not isinstance(tool, dict) or not is_cursor_shell_tool(tool):
+            return
+
+        parameters = parse_json_object(tool.get("params")) or parse_json_object(tool.get("rawArgs")) or {}
+        command = parameters.get("command")
+        if not present(command):
+            return
+
+        description = parameters.get("commandDescription") or parameters.get("description")
+        if present(description):
+            self.emit("bash_description", timestamp, str(description))
+        self.emit("bash_command", timestamp, str(command))
+
+        output = extract_cursor_tool_output(tool.get("result"))
+        if output is not None:
+            self.emit("bash_output", timestamp, output, allow_empty=True)
 
     def render_cursor_entry(self, entry):
         # Turn markers such as {"type": "turn_ended", ...} carry no role and no content.
@@ -438,7 +491,8 @@ class AgentTrace:
             if block_type == "text":
                 text = str(block.get("text", ""))
                 if role == "user":
-                    # Cursor has no record-level timestamps; some user turns carry one inline.
+                    # The fallback JSONL has no record-level timestamps; user turns carry
+                    # a human-readable one inline.
                     self.emit("human", extract_tag(text, "timestamp"), extract_cursor_user_text(text))
                 else:
                     self.emit("assistant", None, text)
@@ -540,6 +594,132 @@ class AgentTrace:
         if len(matches) > 1:
             raise AgentTraceError("multiple session files found: " + ", ".join(str(match) for match in matches))
         return matches[0]
+
+
+def find_cursor_state_database(root_override):
+    if present(root_override):
+        root = Path(root_override).expanduser()
+        candidates = (
+            root / "state.vscdb",
+            root / "globalStorage" / "state.vscdb",
+            root / "User" / "globalStorage" / "state.vscdb",
+            root / "Cursor" / "User" / "globalStorage" / "state.vscdb",
+        )
+    elif sys.platform == "darwin":
+        candidates = (Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "state.vscdb",)
+    elif os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        candidates = (Path(appdata) / "Cursor" / "User" / "globalStorage" / "state.vscdb",) if appdata else ()
+    else:
+        config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        candidates = (config_home / "Cursor" / "User" / "globalStorage" / "state.vscdb",)
+
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def load_cursor_database_entries(database, session_id):
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+    try:
+        composer_row = connection.execute(
+            "SELECT value FROM cursorDiskKV WHERE key = ?",
+            (f"composerData:{session_id}",),
+        ).fetchone()
+        bubble_rows = connection.execute(
+            "SELECT value FROM cursorDiskKV WHERE key LIKE ?",
+            (f"bubbleId:{session_id}:%",),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    bubbles = {}
+    for row in bubble_rows:
+        bubble = decode_cursor_json(row[0])
+        if not isinstance(bubble, dict) or not present(bubble.get("bubbleId")):
+            continue
+        bubbles[str(bubble["bubbleId"])] = bubble
+    if not bubbles or not any(bubble.get("type") in (1, 2) for bubble in bubbles.values()):
+        return None
+
+    composer = decode_cursor_json(composer_row[0]) if composer_row else None
+    headers = composer.get("fullConversationHeadersOnly") if isinstance(composer, dict) else None
+    if isinstance(headers, list) and headers:
+        ordered = []
+        seen = set()
+        for header in headers:
+            if not isinstance(header, dict):
+                continue
+            bubble_id = str(header.get("bubbleId", ""))
+            bubble = bubbles.get(bubble_id)
+            if bubble is None or bubble_id in seen:
+                continue
+            seen.add(bubble_id)
+            if not present(bubble.get("createdAt")) and present(header.get("createdAt")):
+                bubble = dict(bubble)
+                bubble["createdAt"] = header["createdAt"]
+            ordered.append(bubble)
+        if ordered:
+            return ordered
+
+    # Old, partially migrated, and damaged databases do not always retain the
+    # header index. ISO createdAt values provide a useful deterministic fallback.
+    return sorted(bubbles.values(), key=lambda bubble: str(bubble.get("createdAt", "")))
+
+
+def decode_cursor_json(value):
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if not isinstance(value, str):
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def parse_json_object(value):
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def is_cursor_shell_tool(tool):
+    name = str(tool.get("name", "")).lower()
+    return tool.get("tool") == 15 or name == "shell" or "terminal_command" in name
+
+
+def extract_cursor_tool_output(result):
+    if result is None:
+        return None
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+        except json.JSONDecodeError:
+            return result
+        if isinstance(parsed, str):
+            return parsed
+        return extract_cursor_tool_output(parsed)
+    if not isinstance(result, dict):
+        return None
+
+    for key in ("output", "terminalOutput", "terminal_output"):
+        if key in result and result[key] is not None:
+            return extract_text_content(result[key])
+
+    streams = []
+    for key in ("stdout", "stderr"):
+        if key in result and result[key] is not None:
+            streams.append(extract_text_content(result[key]))
+    if streams:
+        return "\n".join(streams)
+
+    nested = result.get("result")
+    return extract_cursor_tool_output(nested) if nested is not result else None
 
 
 def parse_codex_arguments(value, call_id):
