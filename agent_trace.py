@@ -60,6 +60,7 @@ FLAG_OPTIONS = {
     "--bash-output",
     "--bash",
     "--all",
+    "--json",
     "-h",
     "--help",
 }
@@ -71,6 +72,7 @@ Options:
         --harness HARNESS            Harness type. Supported: claude-code (aliases: cc, claude), codex, cursor, pi
         --session SESSION_ID         Session ID
         --root PATH                  Optional. Overrides the default harness data root. May point at the harness config directory or the directory that contains session/project folders.
+        --json                       Output a JSON array of {type, timestamp, text} entries instead of text
     -h, --help                       Show help
 
 Filters:
@@ -96,25 +98,26 @@ class AgentTraceError(Exception):
 
 class AgentTrace:
     def __init__(self, argv):
-        self.options = {"filters": []}
+        self.options = {"filters": [], "json": False}
+        self.records = []
         self.parse(argv)
 
     def run(self):
         self.validate()
         harness = self.options["harness"]
-        if harness == "claude-code":
-            self.render_claude()
-            return
-        if harness == "codex":
-            self.render_codex()
-            return
-        if harness == "cursor":
-            self.render_cursor()
-            return
-        if harness == "pi":
-            self.render_pi()
-            return
-        raise AgentTraceError(f"unsupported harness: {harness!r}. Available harnesses: {available_harnesses_text()}")
+        renderers = {
+            "claude-code": self.render_claude,
+            "codex": self.render_codex,
+            "cursor": self.render_cursor,
+            "pi": self.render_pi,
+        }
+        renderer = renderers.get(harness)
+        if renderer is None:
+            raise AgentTraceError(f"unsupported harness: {harness!r}. Available harnesses: {available_harnesses_text()}")
+        renderer()
+
+        if self.options["json"]:
+            print(json.dumps(self.records, indent=2, ensure_ascii=False))
 
     def parse(self, argv):
         argv = list(argv)
@@ -174,7 +177,9 @@ class AgentTrace:
         if option in ("-h", "--help"):
             print(USAGE, end="")
             raise SystemExit(0)
-        if option in ("--human", "--user"):
+        if option == "--json":
+            self.options["json"] = True
+        elif option in ("--human", "--user"):
             self.add_filter("human")
         elif option == "--assistant":
             self.add_filter("assistant")
@@ -314,6 +319,18 @@ class AgentTrace:
         if filter_name not in self.options["filters"]:
             return
         if not allow_empty and not present(text):
+            return
+
+        if self.options["json"]:
+            # Same field set for every harness: the category, the timestamp as the harness
+            # recorded it (null when it records none), and the text.
+            self.records.append(
+                {
+                    "type": filter_name,
+                    "timestamp": str(timestamp) if present(timestamp) else None,
+                    "text": str(text),
+                }
+            )
             return
 
         glyph, label = BLOCK_STYLES.get(filter_name, ("▌", filter_name.replace("_", " ").capitalize()))

@@ -35,6 +35,8 @@ Three things to specify:
 - **`--session`** — the session id to read.
 - **filters** — what to include in the output (at least one required, see below).
 
+Add `--json` for machine-readable output (see [JSON output](#json-output)).
+
 ```bash
 agent-trace --harness claude-code --session abc123 --human --assistant
 ```
@@ -71,6 +73,41 @@ agent-trace --harness claude-code --session abc123 --thinking --bash-command
 # everything bash: description, command, and output
 agent-trace --harness claude-code --session abc123 --bash
 ```
+
+## JSON output
+
+`--json` prints a JSON array instead of text. Entries carry the same three fields for every
+harness — they describe agent-trace's own categories, not the source transcript's structure — so
+a consumer can treat all harnesses identically.
+
+| Field | Value |
+| --- | --- |
+| `type` | The filter category: `human`, `assistant`, `thinking`, `bash_description`, `bash_command`, `bash_output` |
+| `timestamp` | The timestamp as the harness recorded it, or `null` when it records none |
+| `text` | The message, command, or output text |
+
+```bash
+agent-trace --harness cursor --session abc123 --all --json
+```
+
+```json
+[
+  {
+    "type": "human",
+    "timestamp": "Monday, May 11, 2026, 2:07 PM (UTC+1)",
+    "text": "follow instructions in weekly_analysis_workflow.md"
+  },
+  {
+    "type": "bash_command",
+    "timestamp": null,
+    "text": "git diff task_hub.md"
+  }
+]
+```
+
+Entries appear in transcript order, and the array is empty (`[]`) when nothing matches. Timestamp
+*values* are passed through verbatim rather than normalized, since harnesses record them in
+different formats — Claude Code and Codex use ISO-8601, Cursor a human-readable string.
 
 ## Harness data roots
 
