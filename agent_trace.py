@@ -97,6 +97,7 @@ class AgentTrace:
     def __init__(self, argv):
         self.options = {"filters": [], "json": False}
         self.records = []
+        self.last_output_date = None
         self.parse(argv)
 
     def run(self):
@@ -331,7 +332,11 @@ class AgentTrace:
             return
 
         glyph, label = BLOCK_STYLES.get(filter_name, ("▌", filter_name.replace("_", " ").capitalize()))
-        clock = format_clock(timestamp)
+        date_key, date_label, clock = timestamp_parts(timestamp)
+        if date_key is not None and date_key != self.last_output_date:
+            clock = " ".join(part for part in (date_label, clock) if part)
+        if date_key is not None:
+            self.last_output_date = date_key
         header = f"{glyph} {label}"
         if clock:
             header = f"{header}   {clock}"
@@ -870,15 +875,43 @@ BLOCK_STYLES = {
 }
 
 CLOCK_PATTERN = re.compile(r"(\d{2}:\d{2}:\d{2})")
+ISO_DATE_PATTERN = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+HUMAN_DATE_PATTERN = re.compile(
+    r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+"
+    r"(\d{1,2}),\s+(\d{4}).*?(\d{1,2}:\d{2}(?::\d{2})?\s*[AP]M)",
+    re.IGNORECASE,
+)
+MONTH_NAMES = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+MONTH_LABELS = {name.lower(): name[:3] for name in MONTH_NAMES}
+
+
+def timestamp_parts(timestamp):
+    if not present(timestamp):
+        return None, "", ""
+    text = str(timestamp)
+
+    iso_date = ISO_DATE_PATTERN.search(text)
+    if iso_date:
+        year, month, day = iso_date.groups()
+        clock = CLOCK_PATTERN.search(text)
+        date_label = f"{int(day)} {MONTH_NAMES[int(month) - 1][:3]}"
+        return f"{year}-{month}-{day}", date_label, clock.group(1) if clock else text
+
+    human_date = HUMAN_DATE_PATTERN.search(text)
+    if human_date:
+        month, day, year, clock = human_date.groups()
+        month_number = tuple(name.lower() for name in MONTH_NAMES).index(month.lower()) + 1
+        return f"{year}-{month_number:02d}-{int(day):02d}", f"{int(day)} {MONTH_LABELS[month.lower()]}", clock
+
+    clock = CLOCK_PATTERN.search(text)
+    return None, "", clock.group(1) if clock else text
 
 
 def format_clock(timestamp):
-    if not present(timestamp):
-        return ""
-    match = CLOCK_PATTERN.search(str(timestamp))
-    if match:
-        return match.group(1)
-    return str(timestamp)
+    return timestamp_parts(timestamp)[2]
 
 
 def present(value):

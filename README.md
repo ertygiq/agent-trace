@@ -35,7 +35,7 @@ Three things to specify:
 - **`--session`** — the session id to read.
 - **filters** — what to include in the output (at least one required, see below).
 
-Add `--json` for machine-readable output (see [JSON output](#json-output)).
+Add `--json` for machine-readable output (see [JSON output](#json-output)). In text output, the first displayed entry on each date includes the day and month; later entries on that date show only the time.
 
 ```bash
 agent-trace --harness claude-code --session abc123 --human --assistant
