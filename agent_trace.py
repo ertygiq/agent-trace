@@ -375,6 +375,13 @@ class AgentTrace:
             payload = entry.get("payload") or {}
             if payload.get("type") == "user_message":
                 self.emit("human", timestamp, str(payload.get("message", "")))
+            elif payload.get("type") == "item_completed":
+                # Paginated history uses completed TurnItems instead of legacy
+                # user_message events. Raw user-role response items can also
+                # contain injected context, so they are not human messages.
+                item = payload.get("item") or {}
+                if item.get("type") == "UserMessage":
+                    self.emit("human", timestamp, extract_codex_message_text(item.get("content")))
             return
 
         if entry.get("type") == "response_item":
