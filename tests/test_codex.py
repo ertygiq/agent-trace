@@ -87,6 +87,55 @@ class CodexTranscriptTests(unittest.TestCase):
         self.assertEqual([entry["text"] for entry in result],
                          ["Before compaction", "First answer", "After compaction", "Second answer"])
 
+    def command(self, output="hello\n", status="completed"):
+        return event({"type": "item_completed", "item": {
+            "type": "CommandExecution", "id": "exec-1",
+            "command": ["/bin/sh", "-lc", "printf 'hello\\n'"],
+            "aggregated_output": output, "status": status,
+        }})
+
+    def test_completed_command_and_output(self):
+        result = self.render([self.command()], "--bash")
+        self.assertEqual([entry["type"] for entry in result], ["bash_command", "bash_output"])
+        # Shell quoting preserves argv boundaries, including embedded quotes.
+        import shlex
+        self.assertEqual(shlex.split(result[0]["text"]), ["/bin/sh", "-lc", "printf 'hello\\n'"])
+        self.assertEqual(result[1]["text"], "hello\n")
+        self.assertEqual(result[1]["timestamp"], "2026-01-01T12:00:00Z")
+
+    def test_completed_command_filters(self):
+        for flag, expected in [("--bash-command", ["bash_command"]),
+                               ("--bash-output", ["bash_output"]),
+                               ("--bash-description", []), ("--human", [])]:
+            with self.subTest(flag=flag):
+                result = self.render([self.command()], flag)
+                self.assertEqual([entry["type"] for entry in result], expected)
+
+    def test_failed_command_output_is_preserved(self):
+        result = self.render([self.command("permission denied\n", "failed")], "--bash-output")
+        self.assertEqual(result[0]["text"], "permission denied\n")
+
+    def test_empty_output_is_preserved_but_absent_output_is_not_invented(self):
+        self.assertEqual(self.render([self.command("")], "--bash-output")[0]["text"], "")
+        self.assertEqual(self.render([self.command(None)], "--bash-output"), [])
+
+    def test_raw_exec_wrapper_is_not_exported_as_an_extra_shell_command(self):
+        wrapper = {"type": "response_item", "payload": {
+            "type": "custom_tool_call", "name": "exec", "call_id": "wrapper-1",
+            "input": "text(await tools.exec_command({cmd: 'echo hello'}));"}}
+        result = self.render([wrapper, self.command()], "--bash")
+        self.assertEqual([entry["type"] for entry in result], ["bash_command", "bash_output"])
+
+    def test_legacy_shell_calls_still_work(self):
+        records = [
+            {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+             "call_id": "call-1", "arguments": json.dumps({"cmd": "echo hello"})}},
+            {"type": "response_item", "payload": {"type": "function_call_output",
+             "call_id": "call-1", "output": "hello"}},
+        ]
+        result = self.render(records, "--bash")
+        self.assertEqual([entry["text"] for entry in result], ["echo hello", "hello"])
+
     def test_assistant_filter_excludes_completed_user_messages(self):
         result = self.render([user_item("Question"), response("assistant", "Answer")], "--assistant")
         self.assertEqual([entry["text"] for entry in result], ["Answer"])

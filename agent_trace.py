@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -367,6 +368,15 @@ class AgentTrace:
                 item = payload.get("item") or {}
                 if item.get("type") == "UserMessage":
                     self.emit("human", timestamp, extract_codex_message_text(item.get("content")))
+                elif item.get("type") == "CommandExecution":
+                    command = item.get("command")
+                    if isinstance(command, list):
+                        command = shlex.join(command)
+                    if isinstance(command, str):
+                        self.emit("bash_command", timestamp, command)
+                    output = item.get("aggregated_output")
+                    if output is not None:
+                        self.emit("bash_output", timestamp, output, allow_empty=True)
             return
 
         if entry.get("type") == "response_item":
