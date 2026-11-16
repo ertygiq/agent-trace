@@ -5,6 +5,7 @@ Universal text transcript CLI for agent/harness sessions. Output is text only â€
 Useful for inspecting agent runs, debugging what happened, and evaluating results â€” including handing a transcript to another agent for review.
 
 Implemented in Python using only the standard library.
+Reading compressed Codex session files also requires the `zstd` command on PATH.
 
 ## Supported harnesses
 
@@ -75,6 +76,18 @@ agent-trace --harness claude-code --session abc123 --thinking --bash-command
 # everything bash: description, command, and output
 agent-trace --harness claude-code --session abc123 --bash
 ```
+
+### Codex history
+
+Codex can compress older sessions as `.jsonl.zst` and split a conversation across linked rollout files.
+Agent-trace reads the current rollout path from `state_*.sqlite` in read-only mode, then follows `history_base` links through active and archived session files.
+Ancestor ordinal and byte boundaries exclude abandoned continuation messages without comparing message strings.
+The history SQLite database is a cached projection, not another transcript to append.
+
+Both legacy `user_message` events and paginated `item_completed/UserMessage` events are supported.
+Compaction replacement context is not replayed as conversation; original messages before compaction remain included.
+Missing ancestors and unsupported attached-thread histories produce an error rather than a partial transcript.
+Use the full Codex home as `--root` for linked histories; a standalone rollout directory also works for a single-file session.
 
 ## JSON output
 

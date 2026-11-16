@@ -2,7 +2,9 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 DEFAULT_ROOTS = {
@@ -345,28 +347,11 @@ class AgentTrace:
         print()
 
     def render_codex(self):
-        session_file = self.find_session_file("codex")
+        root = Path(self.options.get("root") or DEFAULT_ROOTS["codex"]).expanduser()
+        session_file = find_codex_session(root, self.options["session_id"])
         bash_call_ids = set()
-        seen_session_meta = False
-
-        with session_file.open("r", encoding="utf-8") as lines:
-            for line_number, line in enumerate(lines, start=1):
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError as error:
-                    raise AgentTraceError(f"invalid JSON in {session_file}:{line_number}: {error}") from error
-
-                if entry.get("type") == "session_meta":
-                    seen_session_meta = True
-                    payload = entry.get("payload") or {}
-                    if payload.get("id") != self.options["session_id"]:
-                        raise AgentTraceError(f"session file id mismatch: expected {self.options['session_id']}, got {payload.get('id')}")
-                    continue
-
-                self.render_codex_entry(entry, bash_call_ids)
-
-        if not seen_session_meta:
-            raise AgentTraceError(f"Codex session file is missing session_meta: {session_file}")
+        for entry in codex_history(root, session_file):
+            self.render_codex_entry(entry, bash_call_ids)
 
     def render_codex_entry(self, entry, bash_call_ids):
         timestamp = entry.get("timestamp")
@@ -732,6 +717,156 @@ def extract_cursor_tool_output(result):
 
     nested = result.get("result")
     return extract_cursor_tool_output(nested) if nested is not result else None
+
+
+@contextmanager
+def open_codex_rollout(path, bounded=False):
+    """Read plain or zstd-compressed history without modifying Codex files."""
+    if path.suffix != ".zst":
+        with path.open("r", encoding="utf-8") as stream:
+            yield stream
+        return
+    try:
+        process = subprocess.Popen(["zstd", "-dc", str(path)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, encoding="utf-8")
+    except FileNotFoundError as error:
+        raise AgentTraceError("Reading compressed Codex sessions requires zstd on PATH") from error
+    try:
+        yield process.stdout
+        # Metadata and bounded ancestors deliberately stop before EOF.
+        if bounded and process.poll() is None:
+            process.terminate()
+    except BaseException:
+        if process.poll() is None:
+            process.terminate()
+        raise
+    finally:
+        process.stdout.close()
+        error = process.stderr.read()
+        process.stderr.close()
+        status = process.wait()
+    if status not in (0, -15, -13):
+        raise AgentTraceError(f"Cannot decompress {path}: {error.strip()}")
+
+
+def codex_metadata(path):
+    with open_codex_rollout(path, bounded=True) as stream:
+        try:
+            record = json.loads(next(stream))
+        except (StopIteration, json.JSONDecodeError) as error:
+            raise AgentTraceError(f"Invalid Codex session metadata: {path}") from error
+    if record.get("type") != "session_meta":
+        raise AgentTraceError(f"Codex session file is missing session_meta: {path}")
+    return record.get("payload") or {}
+
+
+def existing_codex_rollout(path):
+    if path.is_file():
+        return path
+    compressed = Path(str(path) + ".zst")
+    return compressed if compressed.is_file() else None
+
+
+def codex_rollout_paths(root):
+    # Include archived sessions, but not unrelated files elsewhere in CODEX_HOME.
+    dirs = [root / name for name in ("sessions", "archived_sessions")]
+    dirs = [directory for directory in dirs if directory.is_dir()] or [root]
+    paths = []
+    for directory in dirs:
+        paths.extend(directory.rglob("*.jsonl"))
+        paths.extend(path for path in directory.rglob("*.jsonl.zst")
+                     if not Path(str(path)[:-4]).is_file())
+    return paths
+
+
+def codex_rollout_id(path):
+    # Continuations have a new rollout UUID after the thread UUID. Bookmarks
+    # point to rollout IDs, not necessarily the conversation's thread ID.
+    match = re.search(r"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl(?:\.zst)?$", path.name)
+    return match.group(1) if match else None
+
+
+def find_codex_session(root, session_id):
+    databases = sorted(root.glob("state_*.sqlite"),
+                       key=lambda path: int(path.stem.split("_")[-1]))
+    if databases:
+        try:
+            with closing(sqlite3.connect(databases[-1].resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+                row = connection.execute("SELECT rollout_path FROM threads WHERE id = ?", (session_id,)).fetchone()
+            if row:
+                path = existing_codex_rollout(Path(row[0]))
+                if path is None:
+                    raise AgentTraceError(f"Codex session's indexed rollout is missing: {row[0]}")
+                if codex_metadata(path).get("id") != session_id:
+                    raise AgentTraceError(f"Codex session file id mismatch: {path}")
+                return path
+        except sqlite3.Error as error:
+            raise AgentTraceError(f"Cannot read Codex session index: {error}") from error
+    matches = [path for path in codex_rollout_paths(root) if session_id in path.name
+               and codex_metadata(path).get("id") == session_id]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise AgentTraceError(f"Codex session not found under {root}: {session_id}")
+    raise AgentTraceError("Multiple Codex rollouts found; pass --root pointing to CODEX_HOME with its state database")
+
+
+def codex_history(root, selected):
+    """Follow Codex history_base bookmarks, replaying only inherited prefixes.
+
+    Matches codex-rs/thread-store/src/local/rollout_lineage: an ancestor ends
+    before end_ordinal_exclusive (and at end_byte_offset); the child starts
+    after that ordinal. SQLite is an index/projection, not a second transcript
+    to concatenate. No message-text deduplication is involved.
+    """
+    paths = None
+    segments = []
+    seen = set()
+    path = selected
+    end = None
+    while True:
+        if path in seen:
+            raise AgentTraceError(f"Cycle in Codex history: {path}")
+        seen.add(path)
+        meta = codex_metadata(path)
+        if meta.get("attached_thread"):
+            raise AgentTraceError("Attached Codex thread history is not supported yet")
+        base = meta.get("history_base")
+        start = base["end_ordinal_exclusive"] + 1 if base else None
+        segments.append((path, start, end))
+        if not base:
+            break
+        if paths is None:
+            paths = codex_rollout_paths(root)
+        ancestors = [candidate for candidate in paths
+                     if codex_rollout_id(candidate) == base["thread_id"]]
+        if len(ancestors) != 1:
+            raise AgentTraceError(f"Expected one Codex ancestor {base['thread_id']}, found {len(ancestors)}")
+        path, end = ancestors[0], base
+
+    for path, start, end in reversed(segments):
+        with open_codex_rollout(path, bounded=end is not None) as stream:
+            byte_offset = 0
+            for line_number, line in enumerate(stream, 1):
+                if end and byte_offset >= end["end_byte_offset"]:
+                    break
+                byte_offset += len(line.encode("utf-8"))
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise AgentTraceError(f"Invalid JSON in {path}:{line_number}: {error}") from error
+                ordinal = entry.get("ordinal")
+                if end and ordinal is not None and ordinal >= end["end_ordinal_exclusive"]:
+                    break
+                if entry.get("type") == "session_meta":
+                    continue
+                if (start is not None or end is not None) and ordinal is None:
+                    raise AgentTraceError(f"Missing ordinal in linked Codex history: {path}:{line_number}")
+                if start is not None and ordinal < start:
+                    continue
+                yield entry
+            if end and byte_offset < end["end_byte_offset"]:
+                raise AgentTraceError(f"Truncated Codex ancestor: {path}")
 
 
 def parse_codex_arguments(value, call_id):
