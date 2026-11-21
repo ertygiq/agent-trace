@@ -1085,6 +1085,7 @@ def main(argv=None):
         return 0
     except AgentTraceError as error:
         print(f"agent-trace: {error}", file=sys.stderr)
+        print("Run 'agent-trace --help' for usage.", file=sys.stderr)
         return 1
 
     return 0
